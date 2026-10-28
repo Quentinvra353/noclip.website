@@ -20,6 +20,9 @@ interface VideoSettings {
     framerate: number;
     // Seconds; 0 means "until the end of the sequence".
     duration: number;
+    // Render scale before downsizing to the output size.
+    supersample: number;
+    showFrame: boolean;
 }
 
 interface LibraryEntry {
@@ -110,7 +113,7 @@ export class MiiPanel extends Panel {
         if (saved.lightSettings === undefined && saved.light !== undefined)
             lightSettings.intensity = lightSettings.ambient = saved.light;
         return { rendererURL: saved.rendererURL ?? DEFAULT_RENDERER_URL, lightSettings, magnet: saved.magnet ?? true,
-            video: { format: 'landscape', framerate: 60, duration: 0, ...saved.video } };
+            video: { format: 'landscape', framerate: 60, duration: 0, supersample: 2, showFrame: true, ...saved.video } };
     })();
     // Emotion picked for an imported Mii that has no face for it yet, waiting for its export file.
     private alignTarget: MiiActor | null = null;
@@ -664,7 +667,9 @@ export class MiiPanel extends Panel {
             studioVideoSettings.width = vs.format === 'window' ? 0 : vs.format === 'portrait' ? 1080 : 1920;
             studioVideoSettings.height = vs.format === 'window' ? 0 : vs.format === 'portrait' ? 1920 : 1080;
             studioVideoSettings.framerate = vs.framerate;
+            studioVideoSettings.supersample = vs.supersample;
             saveJSON(SETTINGS_KEY, this.settings);
+            this.updateFrameGuide();
         };
         saveVideo();
         out.push(row('Format', select([
@@ -672,6 +677,13 @@ export class MiiPanel extends Panel {
             { value: 'portrait', label: '1080×1920 (vertical, TikTok / Shorts)' },
             { value: 'window', label: 'Taille de la fenêtre' },
         ], vs.format, (v) => { vs.format = v as VideoFormat; saveVideo(); })));
+        const frameToggle = el('input', { type: 'checkbox', checked: vs.showFrame });
+        frameToggle.onchange = () => { vs.showFrame = frameToggle.checked; saveVideo(); };
+        out.push(row('Cadre', el('label', { className: 'MiiStudioInline' }, [frameToggle, 'Montrer la zone filmée'])));
+        out.push(row('Qualité', select([
+            { value: '2', label: 'Maximale (rendu 2× plus grand, plus lent)' },
+            { value: '1', label: 'Normale' },
+        ], String(vs.supersample), (v) => { vs.supersample = Number(v); saveVideo(); })));
         out.push(row('Images/s', select([{ value: '30', label: '30' }, { value: '60', label: '60' }], String(vs.framerate), (v) => { vs.framerate = Number(v); saveVideo(); })));
         const lastStep = Math.max(0, ...layer.actors.flatMap((a) => a.state.steps.map((st) => st.time)));
         if (vs.duration <= 0)
@@ -738,6 +750,40 @@ export class MiiPanel extends Panel {
     }
 
     private videoProgressElem = el('span', { textContent: '' });
+    private frameGuide: HTMLElement | null = null;
+
+    // Shows on top of the view what the exported video will contain. The export keeps the
+    // vertical field of view, so the frame is as tall as the view and cut on the sides.
+    private updateFrameGuide(): void {
+        const viewer = this.viewer;
+        if (viewer === null)
+            return;
+        if (this.frameGuide === null) {
+            this.frameGuide = el('div');
+            this.frameGuide.style.cssText = 'position: absolute; pointer-events: none; box-sizing: border-box; border: 2px dashed rgba(255, 255, 255, 0.9); box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);';
+            const thirds = el('div');
+            thirds.style.cssText = 'position: absolute; inset: 0; background-image: linear-gradient(to right, transparent calc(33.33% - 0.5px), rgba(255,255,255,0.25) calc(33.33% - 0.5px), rgba(255,255,255,0.25) calc(33.33% + 0.5px), transparent calc(33.33% + 0.5px), transparent calc(66.66% - 0.5px), rgba(255,255,255,0.25) calc(66.66% - 0.5px), rgba(255,255,255,0.25) calc(66.66% + 0.5px), transparent calc(66.66% + 0.5px)), linear-gradient(to bottom, transparent calc(33.33% - 0.5px), rgba(255,255,255,0.25) calc(33.33% - 0.5px), rgba(255,255,255,0.25) calc(33.33% + 0.5px), transparent calc(33.33% + 0.5px), transparent calc(66.66% - 0.5px), rgba(255,255,255,0.25) calc(66.66% - 0.5px), rgba(255,255,255,0.25) calc(66.66% + 0.5px), transparent calc(66.66% + 0.5px));';
+            this.frameGuide.append(thirds);
+            window.addEventListener('resize', () => this.updateFrameGuide());
+        }
+        // Right above the Mii canvas, under the rest of the UI.
+        const anchor = this.layer?.canvas ?? viewer.canvas;
+        const parent = anchor.parentElement;
+        if (parent !== null && this.frameGuide.previousElementSibling !== anchor)
+            anchor.insertAdjacentElement('afterend', this.frameGuide);
+        const vs = this.settings.video;
+        const visible = vs.showFrame && vs.format !== 'window' && this.recorder === null;
+        this.frameGuide.style.display = visible ? '' : 'none';
+        if (!visible)
+            return;
+        const rect = viewer.canvas.getBoundingClientRect(), parentRect = parent!.getBoundingClientRect();
+        const aspect = vs.format === 'portrait' ? 1080 / 1920 : 1920 / 1080;
+        const h = rect.height, w = h * aspect;
+        this.frameGuide.style.left = `${rect.left - parentRect.left + (rect.width - w) / 2}px`;
+        this.frameGuide.style.top = `${rect.top - parentRect.top}px`;
+        this.frameGuide.style.width = `${w}px`;
+        this.frameGuide.style.height = `${h}px`;
+    }
 
     private async exportVideo(): Promise<void> {
         if (this.viewer === null || this.recorder !== null)
@@ -749,13 +795,14 @@ export class MiiPanel extends Panel {
         const viewer = this.viewer;
         const vs = this.settings.video;
         this.recorder = new VideoRecorder(viewer, null, {
-            width: studioVideoSettings.width, height: studioVideoSettings.height, framerate: vs.framerate,
+            width: studioVideoSettings.width, height: studioVideoSettings.height, framerate: vs.framerate, supersample: vs.supersample,
             durationMs: vs.duration * 1000, filenamePrefix: 'Mii',
             onProgress: (f) => { this.videoProgressElem.textContent = `Enregistrement… ${Math.round(f * 100)} %`; },
         });
         this.videoProgressElem.textContent = 'Préparation…';
         this.setMessage('');
         this.rebuild();
+        this.updateFrameGuide();
         viewer.externalControl = true;
         try {
             await this.recorder.render();
@@ -766,6 +813,7 @@ export class MiiPanel extends Panel {
             viewer.externalControl = false;
             this.recorder = null;
             this.rebuild();
+            this.updateFrameGuide();
         }
     }
 
