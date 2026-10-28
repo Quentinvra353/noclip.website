@@ -9,6 +9,7 @@ import { createSwapChainForWebGL2, gfxDeviceGetImpl_GL, GfxPlatformWebGL2Config 
 import { createSwapChainForWebGPU, GfxPlatformWebGPUConfig } from './gfx/platform/GfxPlatformWebGPU.js';
 import { RenderStatistics, RenderStatisticsTracker } from './RenderStatistics.js';
 import { AntialiasingMode } from './gfx/helpers/RenderGraphHelpers.js';
+import { gfxrRenderGraphHooks } from './gfx/render/GfxRenderGraph.js';
 import { WebXRContext, WebXRInputManager } from './WebXR.js';
 import { IS_DEVELOPMENT } from './BuildVersion.js';
 import { GlobalSaveManager } from './SaveManager.js';
@@ -156,6 +157,7 @@ export class Viewer {
     }
 
     private renderViewport(): void {
+        gfxrRenderGraphHooks.mainOutputTexture = this.viewerRenderInput.onscreenTexture;
         if (this.scene !== null)
             this.scene.render(this.gfxDevice, this.viewerRenderInput);
     }

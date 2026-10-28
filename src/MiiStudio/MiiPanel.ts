@@ -94,12 +94,12 @@ export class MiiPanel extends Panel {
     private messageElem: HTMLElement;
     private clockElem: HTMLElement;
     private bodyElem: HTMLElement;
-    private settings: { rendererURL: string, lightSettings: LightSettings } = (() => {
-        const saved = loadJSON<{ rendererURL?: string, light?: number, lightSettings?: Partial<LightSettings> }>(SETTINGS_KEY, {});
+    private settings: { rendererURL: string, lightSettings: LightSettings, magnet: boolean } = (() => {
+        const saved = loadJSON<{ rendererURL?: string, light?: number, lightSettings?: Partial<LightSettings>, magnet?: boolean }>(SETTINGS_KEY, {});
         const lightSettings = { ...DEFAULT_LIGHT, ...saved.lightSettings };
         if (saved.lightSettings === undefined && saved.light !== undefined)
             lightSettings.intensity = lightSettings.ambient = saved.light;
-        return { rendererURL: saved.rendererURL ?? DEFAULT_RENDERER_URL, lightSettings };
+        return { rendererURL: saved.rendererURL ?? DEFAULT_RENDERER_URL, lightSettings, magnet: saved.magnet ?? true };
     })();
     // Emotion picked for an imported Mii that has no face for it yet, waiting for its export file.
     private pendingFace: { actor: MiiActor, expression: string, apply: (expression: string) => void } | null = null;
@@ -151,6 +151,13 @@ export class MiiPanel extends Panel {
         this.layer = new MiiLayer(viewer);
         this.layer.rendererURL = this.settings.rendererURL;
         this.layer.setLight(this.settings.lightSettings);
+        this.layer.magnet = this.settings.magnet;
+        this.layer.onactormoved = (actor, done) => {
+            this.selected = actor;
+            if (done)
+                this.changed();
+            this.rebuild();
+        };
         this.layer.onclock = (t) => { this.clockElem.textContent = `${t.toFixed(2)} s`; };
         this.layer.onactorerror = (actor, error) => {
             this.setMessage(`Impossible de charger la tête de « ${actor.state.name} » depuis le serveur de rendu (${error}).\nEssaie l'autre serveur dans « Réglages ».`);
@@ -207,6 +214,10 @@ export class MiiPanel extends Panel {
         fx /= len; fz /= len;
         const dist = size * 2.5;
         const yaw = Math.atan2(-fx, -fz) * 180 / Math.PI;
+        // With the magnet on, stand on the scenery seen a bit below the middle of the screen.
+        const ground = this.layer!.magnet ? this.layer!.pickScenery(0, -0.3, size) : null;
+        if (ground !== null)
+            return { position: ground, yaw };
         return { position: [px + fx * dist, py - size * 0.9, pz + fz * dist], yaw };
     }
 
@@ -403,6 +414,23 @@ export class MiiPanel extends Panel {
     private buildActors(): HTMLElement[] {
         const layer = this.layer!;
         const out: HTMLElement[] = [section('Dans la map')];
+        const moveBtn = button(layer.moveMode ? '🖱 Déplacer à la souris : OUI' : '🖱 Déplacer à la souris : non', () => {
+            layer.moveMode = !layer.moveMode;
+            this.rebuild();
+        }, 'Clique sur un Mii dans la map et fais-le glisser');
+        if (layer.moveMode)
+            moveBtn.classList.add('active');
+        const magnet = el('input', { type: 'checkbox', checked: layer.magnet });
+        magnet.onchange = () => {
+            layer.magnet = magnet.checked;
+            this.settings.magnet = magnet.checked;
+            saveJSON(SETTINGS_KEY, this.settings);
+        };
+        out.push(el('div', { className: 'MiiStudioInline' }, [moveBtn, el('label', { className: 'MiiStudioInline' }, [magnet, '🧲 Aimanter au décor'])]));
+        if (layer.moveMode)
+            out.push(el('div', { className: 'MiiStudioHint', textContent: 'Clique sur un Mii et fais-le glisser. Avec l\'aimant, il se pose sur la surface sous la souris. Maintiens Maj en cliquant pour le monter ou le descendre. Clique à côté des Mii pour bouger la caméra comme d\'habitude.' }));
+        if (!layer.depth.supported)
+            out.push(el('div', { className: 'MiiStudioHint', textContent: 'L\'aimant et l\'ombre sur le sol réel ne marchent qu\'avec le rendu WebGL (pas WebGPU).' }));
         if (layer.actors.length === 0) {
             out.push(el('div', { textContent: 'Aucun Mii placé. Vole jusqu\'à l\'endroit voulu puis clique sur « Placer ici ».' }));
             return out;
@@ -473,6 +501,14 @@ export class MiiPanel extends Panel {
                 sync();
                 this.rebuild();
             }),
+            button('Poser au sol', () => {
+                if (!this.layer!.dropToGround(actor))
+                    this.setMessage('Pas de sol trouvé sous ce Mii. Il faut que le sol sous lui soit visible à l\'écran.');
+                else
+                    this.setMessage('');
+                this.changed();
+                this.rebuild();
+            }, 'Fait tomber le Mii sur le décor en dessous'),
             button('▲', () => { s.position[1] += step; sync(); this.rebuild(); }, 'Monter'),
             button('▼', () => { s.position[1] -= step; sync(); this.rebuild(); }, 'Descendre'),
         ])));
