@@ -88,6 +88,10 @@ export function parseMiiData(input: Uint8Array | string): MiiInfo {
     if (b.length === 47)
         return infoFromStudio(decodeStudio(b), 'Studio (encodé)');
 
+    // Mii Creator .miic files are FFSD data followed by extra fields.
+    if (b.length > 96 && b.length <= 256 && b[0] === 3)
+        return { ...parseMiiData(b.subarray(0, 96)), format: 'Mi Creator (.miic)' };
+
     // 3DS / Wii U (CFSD / FFSD, with or without the trailing checksum).
     if (b.length === 92 || b.length === 96) {
         const flags = b[0x18] | (b[0x19] << 8);
