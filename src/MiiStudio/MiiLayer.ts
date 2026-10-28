@@ -74,6 +74,7 @@ export interface MiiStep {
 export interface MiiActorState {
     name: string;
     data: string;
+    miic?: string;
     gender: MiiGender;
     favoriteColor: number;
     height: number;
@@ -354,6 +355,8 @@ export class MiiLayer implements ViewerOverlay {
             shaderType: 'wiiu',
             verifyCharInfo: '0',
         });
+        if (state.miic !== undefined)
+            params.set('miic', state.miic);
         return `${this.rendererURL}.glb?${params.toString()}`;
     }
 

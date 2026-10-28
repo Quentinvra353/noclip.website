@@ -10,6 +10,8 @@ export interface MiiInfo {
     height: number;
     build: number;
     format: string;
+    // Mii Creator's own data (base64), which the Mi Creator renderer uses for its extra colors.
+    miic?: string;
 }
 
 // FFL favorite colors, used for the shirt.
@@ -76,21 +78,56 @@ function infoFromStudio(raw: Uint8Array, format: string): MiiInfo {
     };
 }
 
+function bytesToBase64(b: Uint8Array): string {
+    let s = '';
+    for (let i = 0; i < b.length; i++)
+        s += String.fromCharCode(b[i]);
+    return btoa(s);
+}
+
+function isMiiCreatorData(b: Uint8Array): boolean {
+    return b.length > 96 && b.length <= 512 && (b[0] === 3 || b[0] === 5);
+}
+
+// Accepts one or more codes (one per line), e.g. the CharInfo or Studio data plus the Mii Creator data.
 export function parseMiiData(input: Uint8Array | string): MiiInfo {
-    const b = typeof input === 'string' ? parseTextToBytes(input) : input;
-    if (b === null || b.length === 0)
+    const chunks: Uint8Array[] = [];
+    if (typeof input === 'string') {
+        for (const part of input.split(/[\n;|]+/)) {
+            if (part.trim().length === 0)
+                continue;
+            const b = parseTextToBytes(part);
+            if (b === null || b.length === 0)
+                throw new Error(`Données Mii illisibles.`);
+            chunks.push(b);
+        }
+    } else {
+        chunks.push(input);
+    }
+    if (chunks.length === 0)
         throw new Error(`Données Mii illisibles.`);
 
+    const miic = chunks.find(isMiiCreatorData);
+    const standard = chunks.find((b) => !isMiiCreatorData(b));
+    let info: MiiInfo;
+    if (standard !== undefined)
+        info = parseStandardMiiData(standard);
+    else if (miic !== undefined && miic[0] === 3)
+        info = { ...parseStandardMiiData(miic.subarray(0, 96)), format: 'Mi Creator (.miic)' };
+    else
+        throw new Error(`Ce fichier .miic seul ne suffit pas : ajoute aussi le fichier .charinfo du même Mii (sélectionne les deux fichiers en même temps).`);
+    if (miic !== undefined)
+        info.miic = bytesToBase64(miic);
+    return info;
+}
+
+function parseStandardMiiData(b: Uint8Array): MiiInfo {
     const hex = bytesToHex(b);
 
     if (b.length === 46)
         return infoFromStudio(b, 'Studio');
     if (b.length === 47)
         return infoFromStudio(decodeStudio(b), 'Studio (encodé)');
-
-    // Mii Creator .miic files are FFSD data followed by extra fields.
-    if (b.length > 96 && b.length <= 256 && b[0] === 3)
-        return { ...parseMiiData(b.subarray(0, 96)), format: 'Mi Creator (.miic)' };
 
     // 3DS / Wii U (CFSD / FFSD, with or without the trailing checksum).
     if (b.length === 92 || b.length === 96) {
