@@ -4,7 +4,7 @@ import type { Viewer } from '../viewer.js';
 import { GlobalSaveManager } from '../SaveManager.js';
 import { FAVORITE_COLOR_NAMES, MiiGender, parseMiiData } from './MiiData.js';
 import { saveModel } from './MiiStore.js';
-import { ALT_RENDERER_URL, animationDisplayName, BodyModel, DEFAULT_RENDERER_URL, EXPRESSIONS, MiiActor, MiiActorState, MiiLayer } from './MiiLayer.js';
+import { ALT_RENDERER_URL, animationDisplayName, animationSortKey, BodyModel, DEFAULT_LIGHT, DEFAULT_RENDERER_URL, EXPRESSIONS, LightSettings, MiiActor, MiiActorState, MiiLayer } from './MiiLayer.js';
 
 const MII_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" height="20" fill="white"><circle cx="12" cy="7" r="5"/><path d="M4 23c0-5 3.6-8.5 8-8.5s8 3.5 8 8.5z"/></svg>`;
 
@@ -94,7 +94,15 @@ export class MiiPanel extends Panel {
     private messageElem: HTMLElement;
     private clockElem: HTMLElement;
     private bodyElem: HTMLElement;
-    private settings = loadJSON(SETTINGS_KEY, { rendererURL: DEFAULT_RENDERER_URL, light: 1.6 });
+    private settings: { rendererURL: string, lightSettings: LightSettings } = (() => {
+        const saved = loadJSON<{ rendererURL?: string, light?: number, lightSettings?: Partial<LightSettings> }>(SETTINGS_KEY, {});
+        const lightSettings = { ...DEFAULT_LIGHT, ...saved.lightSettings };
+        if (saved.lightSettings === undefined && saved.light !== undefined)
+            lightSettings.intensity = lightSettings.ambient = saved.light;
+        return { rendererURL: saved.rendererURL ?? DEFAULT_RENDERER_URL, lightSettings };
+    })();
+    // Emotion picked for an imported Mii that has no face for it yet, waiting for its export file.
+    private pendingFace: { actor: MiiActor, expression: string, apply: (expression: string) => void } | null = null;
 
     constructor() {
         super();
@@ -119,6 +127,7 @@ export class MiiPanel extends Panel {
                 .MiiStudioItem > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
                 .MiiStudioItem.selected > span { color: rgb(255, 120, 120); }
                 .MiiStudioMessage { color: #ffb070; white-space: pre-wrap; }
+                .MiiStudioHint { color: #aaa; font-size: 12px; line-height: 1.4; }
             </style>
         `);
 
@@ -141,7 +150,7 @@ export class MiiPanel extends Panel {
         this.viewer = viewer;
         this.layer = new MiiLayer(viewer);
         this.layer.rendererURL = this.settings.rendererURL;
-        this.layer.setLightIntensity(this.settings.light);
+        this.layer.setLight(this.settings.lightSettings);
         this.layer.onclock = (t) => { this.clockElem.textContent = `${t.toFixed(2)} s`; };
         this.layer.onactorerror = (actor, error) => {
             this.setMessage(`Impossible de charger la tête de « ${actor.state.name} » depuis le serveur de rendu (${error}).\nEssaie l'autre serveur dans « Réglages ».`);
@@ -262,31 +271,86 @@ export class MiiPanel extends Panel {
             const label = name.trim() || file.name.replace(/_all_body.*$|\.glb$/i, '') || `Mii ${this.library.length + 1}`;
             this.library.push({ name: label, model: id, faces: {} });
             saveJSON(LIBRARY_KEY, this.library);
-            this.setMessage(`« ${label} » ajouté (modèle 3D Mi Creator). Ajoute d'autres émotions avec « + Émotion ».`);
+            this.setMessage(`« ${label} » ajouté (modèle 3D Mi Creator). Place-le, puis choisis une émotion dans sa liste « Émotion » pour l'ajouter.`);
         } catch (e) {
             this.setMessage(`Impossible d'enregistrer le modèle 3D (${e}).`);
         }
         this.rebuild();
     }
 
-    private async addFaceToEntry(entry: LibraryEntry, expression: string, file: File): Promise<void> {
+    private async addFace(model: string, name: string, expression: string, file: File): Promise<boolean> {
         try {
             const id = await saveModel(await file.arrayBuffer());
             await this.layer!.loadFace(id);
-            entry.faces = { ...entry.faces, [expression]: id };
+            for (const entry of this.library)
+                if (entry.model === model)
+                    entry.faces = { ...entry.faces, [expression]: id };
             saveJSON(LIBRARY_KEY, this.library);
             for (const actor of this.layer!.actors) {
-                if (actor.state.model === entry.model) {
+                if (actor.state.model === model) {
                     actor.state.faces = { ...actor.state.faces, [expression]: id };
                     actor.invalidateHead();
                 }
             }
             this.changed();
-            this.setMessage(`Émotion « ${expressionName(expression, true)} » ajoutée à « ${entry.name} ».`);
+            this.setMessage(`Émotion « ${expressionName(expression, true)} » ajoutée à « ${name} ».`);
+            return true;
         } catch (e) {
             this.setMessage(`${e}`);
+            return false;
         }
+    }
+
+    private expressionOptions(actor: MiiActor): { value: string, label: string }[] {
+        if (!actor.isImported())
+            return EXPRESSIONS.map((e) => ({ value: e.id, label: e.name }));
+        const faces = actor.state.faces ?? {};
+        return EXPRESSIONS.map((e) => ({
+            value: e.id,
+            label: e.id === 'normal' || faces[e.id] !== undefined ? expressionName(e.id, true) : `${e.name} (à importer)`,
+        }));
+    }
+
+    // Picking an emotion an imported Mii has no face for asks for that emotion's export first.
+    private pickExpression(actor: MiiActor, expression: string, apply: (expression: string) => void): void {
+        if (actor.isImported() && expression !== 'normal' && actor.state.faces?.[expression] === undefined) {
+            this.pendingFace = { actor, expression, apply };
+            this.rebuild();
+            return;
+        }
+        this.pendingFace = null;
+        apply(expression);
+        actor.applyStepAt(this.layer!.clock);
+        this.changed();
         this.rebuild();
+    }
+
+    private buildPendingFace(actor: MiiActor): HTMLElement[] {
+        const pending = this.pendingFace;
+        if (pending === null || pending.actor !== actor)
+            return [];
+        const name = expressionName(pending.expression, true);
+        const faceInput = el('input', { type: 'file', accept: '.glb' });
+        faceInput.style.display = 'none';
+        faceInput.onchange = async () => {
+            const f = faceInput.files?.[0];
+            if (f === undefined)
+                return;
+            if (await this.addFace(actor.state.model!, actor.state.name, pending.expression, f)) {
+                this.pendingFace = null;
+                pending.apply(pending.expression);
+                actor.applyStepAt(this.layer!.clock);
+                this.changed();
+            }
+            this.rebuild();
+        };
+        const hint = el('div', { className: 'MiiStudioHint', textContent:
+            `Il manque le visage « ${name} ». Dans Mi Creator, donne cette émotion à ton Mii, refais « Créer un modèle 3D » avec les mêmes réglages, puis choisis le fichier ici. Une seule fois par émotion : ensuite elle reste enregistrée.` });
+        return [hint, el('div', { className: 'MiiStudioInline' }, [
+            button(`Choisir le .glb « ${name} »`, () => faceInput.click()),
+            button('Annuler', () => { this.pendingFace = null; this.rebuild(); }),
+            faceInput,
+        ])];
     }
 
     private buildLibrary(): HTMLElement[] {
@@ -332,21 +396,6 @@ export class MiiPanel extends Panel {
                     this.rebuild();
                 }, 'Retirer de la bibliothèque'),
             ]));
-            if (entry.model !== undefined) {
-                const exprSelect = select(EXPRESSIONS.filter((e) => e.id !== 'normal').map((e) => ({ value: e.id, label: e.name })), 'smile', () => {});
-                const faceInput = el('input', { type: 'file', accept: '.glb' });
-                faceInput.style.display = 'none';
-                faceInput.onchange = () => {
-                    const f = faceInput.files?.[0];
-                    if (f !== undefined)
-                        this.addFaceToEntry(entry, exprSelect.value, f);
-                };
-                out.push(el('div', { className: 'MiiStudioInline' }, [
-                    exprSelect,
-                    button('+ Émotion', () => faceInput.click(), 'Choisis le .glb exporté avec cette émotion'),
-                    faceInput,
-                ]));
-            }
         });
         return out;
     }
@@ -388,11 +437,14 @@ export class MiiPanel extends Panel {
         const base = s.steps[0];
         const out: HTMLElement[] = [section(`Réglages de « ${s.name} »`)];
 
-        const animOptions = actor.getAnimationNames().map((a) => ({ value: a, label: animationDisplayName(a) }));
-        const exprOptions = actor.getExpressionIds().map((id) => ({ value: id, label: expressionName(id, actor.isImported()) }));
+        const animOptions = actor.getAnimationNames()
+            .sort((a, b) => animationSortKey(a) - animationSortKey(b))
+            .map((a) => ({ value: a, label: animationDisplayName(a, s.bodyModel) }));
+        const exprOptions = this.expressionOptions(actor);
 
         out.push(row('Animation', select(animOptions, base.animation, (v) => { base.animation = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
-        out.push(row('Émotion', select(exprOptions, base.expression, (v) => { base.expression = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
+        out.push(row('Émotion', select(exprOptions, base.expression, (v) => this.pickExpression(actor, v, (e) => { base.expression = e; }))));
+        out.push(...this.buildPendingFace(actor));
 
         const reload = async () => {
             this.changed();
@@ -444,7 +496,7 @@ export class MiiPanel extends Panel {
             out.push(el('div', { className: 'MiiStudioInline' }, [
                 t,
                 select(animOptions, st.animation, (v) => { st.animation = v; this.changed(); }),
-                select(exprOptions, st.expression, (v) => { st.expression = v; this.changed(); }),
+                select(exprOptions, st.expression, (v) => this.pickExpression(actor, v, (e) => { st.expression = e; })),
                 button('✕', () => { s.steps.splice(i, 1); this.changed(); this.rebuild(); }),
             ]));
         });
@@ -482,13 +534,42 @@ export class MiiPanel extends Panel {
             for (const a of layer.actors)
                 a.invalidateHead();
         })));
-        const light = el('input', { type: 'range', min: '0', max: '4', step: '0.1', value: String(this.settings.light) });
-        light.oninput = () => {
-            this.settings.light = parseFloat(light.value);
-            layer.setLightIntensity(this.settings.light);
+
+        out.push(section('Lumière et ombre'));
+        const ls = this.settings.lightSettings;
+        const applyLight = () => {
+            layer.setLight(ls);
             saveJSON(SETTINGS_KEY, this.settings);
         };
-        out.push(row('Lumière', light));
+        const slider = (label: string, key: 'intensity' | 'azimuth' | 'elevation' | 'ambient' | 'shadowOpacity', min: number, max: number, stepV: number, fmt: (v: number) => string) => {
+            const value = el('span', { textContent: fmt(ls[key]) });
+            value.style.cssText = 'min-width: 48px; text-align: right;';
+            const input = el('input', { type: 'range', min: String(min), max: String(max), step: String(stepV), value: String(ls[key]) });
+            input.style.flex = '1';
+            input.oninput = () => {
+                ls[key] = parseFloat(input.value);
+                value.textContent = fmt(ls[key]);
+                applyLight();
+            };
+            return row(label, el('div', { className: 'MiiStudioInline' }, [input, value]));
+        };
+        const deg = (v: number) => `${Math.round(v)}°`;
+        const num = (v: number) => v.toFixed(1);
+        out.push(slider('Force', 'intensity', 0, 5, 0.1, num));
+        out.push(slider('Direction', 'azimuth', 0, 360, 1, deg));
+        out.push(slider('Hauteur', 'elevation', 5, 90, 1, (v) => v >= 89.5 ? '90° (au-dessus)' : deg(v)));
+        const color = el('input', { type: 'color', value: ls.color });
+        color.oninput = () => { ls.color = color.value; applyLight(); };
+        out.push(row('Couleur', color));
+        out.push(slider('Ambiance', 'ambient', 0, 4, 0.1, num));
+        const shadow = el('input', { type: 'checkbox', checked: ls.shadow });
+        shadow.onchange = () => { ls.shadow = shadow.checked; applyLight(); };
+        out.push(row('Ombre au sol', el('label', { className: 'MiiStudioInline' }, [shadow, 'Projeter l\'ombre'])));
+        out.push(slider('Opacité', 'shadowOpacity', 0, 1, 0.05, (v) => `${Math.round(v * 100)} %`));
+        out.push(el('div', { className: 'MiiStudioHint', textContent: 'Direction : tourne la lumière autour des Mii. Hauteur : 90° = soleil juste au-dessus. L\'ombre est posée sur un sol plat sous les pieds du Mii.' }));
+        out.push(el('div', { className: 'MiiStudioInline' }, [
+            button('Lumière par défaut', () => { Object.assign(ls, DEFAULT_LIGHT); applyLight(); this.rebuild(); }),
+        ]));
         return out;
     }
 
