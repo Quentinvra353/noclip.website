@@ -3,6 +3,7 @@ import { Panel, COOL_BLUE_COLOR } from '../ui.js';
 import type { Viewer } from '../viewer.js';
 import { GlobalSaveManager } from '../SaveManager.js';
 import { FAVORITE_COLOR_NAMES, MiiGender, parseMiiData } from './MiiData.js';
+import { saveModel } from './MiiStore.js';
 import { ALT_RENDERER_URL, animationDisplayName, BodyModel, DEFAULT_RENDERER_URL, EXPRESSIONS, MiiActor, MiiActorState, MiiLayer } from './MiiLayer.js';
 
 const MII_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" height="20" fill="white"><circle cx="12" cy="7" r="5"/><path d="M4 23c0-5 3.6-8.5 8-8.5s8 3.5 8 8.5z"/></svg>`;
@@ -13,7 +14,16 @@ const SCENE_KEY_PREFIX = 'MiiStudio_Scene_';
 
 interface LibraryEntry {
     name: string;
-    data: string;
+    data?: string;
+    // Imported Mi Creator 3D model, and one export per extra expression.
+    model?: string;
+    faces?: Record<string, string>;
+}
+
+function expressionName(id: string, imported: boolean): string {
+    if (imported && id === 'normal')
+        return 'Visage de l\'export';
+    return EXPRESSIONS.find((e) => e.id === id)?.name ?? id;
 }
 
 function loadJSON<T>(key: string, fallback: T): T {
@@ -194,25 +204,37 @@ export class MiiPanel extends Panel {
     private async placeFromLibrary(entry: LibraryEntry): Promise<void> {
         if (this.layer === null || this.viewer === null)
             return;
+        const size = this.selected?.state.size ?? 100;
+        const { position, yaw } = this.cameraPlacement(size);
+        if (entry.model !== undefined) {
+            await this.addActor({
+                name: entry.name, data: '', gender: MiiGender.Male, favoriteColor: 0, height: 64, build: 64,
+                bodyModel: 'miitomo', position, yaw, size, visible: true,
+                steps: [{ time: 0, animation: 'Wait', expression: 'normal' }],
+                model: entry.model, faces: { ...entry.faces },
+            });
+            return;
+        }
         let info;
         try {
-            info = parseMiiData(entry.data);
+            info = parseMiiData(entry.data ?? '');
         } catch (e) {
             this.setMessage(`${e}`);
             return;
         }
-        const size = this.selected?.state.size ?? 100;
-        const { position, yaw } = this.cameraPlacement(size);
-        const state: MiiActorState = {
+        await this.addActor({
             name: entry.name, data: info.rendererData, miic: info.miic,
             gender: info.gender, favoriteColor: info.favoriteColor,
             height: info.height, build: info.build,
             bodyModel: 'miitomo', position, yaw, size, visible: true,
             steps: [{ time: 0, animation: 'Wait', expression: 'normal' }],
-        };
+        });
+    }
+
+    private async addActor(state: MiiActorState): Promise<void> {
         this.setMessage('Chargement du Mii…');
         try {
-            this.selected = await this.layer.addActor(state);
+            this.selected = await this.layer!.addActor(state);
             this.setMessage('');
         } catch (e) {
             this.reportLoadError(e);
@@ -234,17 +256,56 @@ export class MiiPanel extends Panel {
         this.rebuild();
     }
 
+    private async addModelToLibrary(name: string, file: File): Promise<void> {
+        try {
+            const id = await saveModel(await file.arrayBuffer());
+            const label = name.trim() || file.name.replace(/_all_body.*$|\.glb$/i, '') || `Mii ${this.library.length + 1}`;
+            this.library.push({ name: label, model: id, faces: {} });
+            saveJSON(LIBRARY_KEY, this.library);
+            this.setMessage(`« ${label} » ajouté (modèle 3D Mi Creator). Ajoute d'autres émotions avec « + Émotion ».`);
+        } catch (e) {
+            this.setMessage(`Impossible d'enregistrer le modèle 3D (${e}).`);
+        }
+        this.rebuild();
+    }
+
+    private async addFaceToEntry(entry: LibraryEntry, expression: string, file: File): Promise<void> {
+        try {
+            const id = await saveModel(await file.arrayBuffer());
+            await this.layer!.loadFace(id);
+            entry.faces = { ...entry.faces, [expression]: id };
+            saveJSON(LIBRARY_KEY, this.library);
+            for (const actor of this.layer!.actors) {
+                if (actor.state.model === entry.model) {
+                    actor.state.faces = { ...actor.state.faces, [expression]: id };
+                    actor.invalidateHead();
+                }
+            }
+            this.changed();
+            this.setMessage(`Émotion « ${expressionName(expression, true)} » ajoutée à « ${entry.name} ».`);
+        } catch (e) {
+            this.setMessage(`${e}`);
+        }
+        this.rebuild();
+    }
+
     private buildLibrary(): HTMLElement[] {
         const out: HTMLElement[] = [section('Mes Mii')];
 
         const nameInput = el('input', { type: 'text', placeholder: 'Nom du Mii' });
         const dataInput = el('textarea', { placeholder: 'Colle ici les « Données CharInfo/Switch (Hex) » de Mi Creator, puis sur une 2e ligne les « Données Mii Creator (Base64) »' });
-        const fileInput = el('input', { type: 'file', accept: '.miic,.mii,.charinfo,.ffsd,.cfsd,.bin,.rcd,.3dsmii,.txt' });
+        const fileInput = el('input', { type: 'file', accept: '.glb,.miic,.mii,.charinfo,.ffsd,.cfsd,.bin,.rcd,.3dsmii,.txt' });
         fileInput.multiple = true;
         fileInput.onchange = async () => {
             const files = Array.from(fileInput.files ?? []);
             if (files.length === 0)
                 return;
+            const glb = files.find((f) => /\.glb$/i.test(f.name));
+            if (glb !== undefined) {
+                fileInput.value = '';
+                await this.addModelToLibrary(nameInput.value, glb);
+                return;
+            }
             const parts: string[] = [];
             for (const f of files) {
                 const buf = new Uint8Array(await f.arrayBuffer());
@@ -260,8 +321,10 @@ export class MiiPanel extends Panel {
         ]));
 
         this.library.forEach((entry, i) => {
+            const faceCount = Object.keys(entry.faces ?? {}).length;
+            const label = entry.model !== undefined ? `${entry.name} (3D, ${faceCount + 1} visage${faceCount > 0 ? 's' : ''})` : entry.name;
             out.push(el('div', { className: 'MiiStudioItem' }, [
-                el('span', { textContent: entry.name, title: entry.data }),
+                el('span', { textContent: label, title: entry.data ?? '' }),
                 button('Placer ici', () => this.placeFromLibrary(entry), 'Place ce Mii devant la caméra'),
                 button('✕', () => {
                     this.library.splice(i, 1);
@@ -269,6 +332,21 @@ export class MiiPanel extends Panel {
                     this.rebuild();
                 }, 'Retirer de la bibliothèque'),
             ]));
+            if (entry.model !== undefined) {
+                const exprSelect = select(EXPRESSIONS.filter((e) => e.id !== 'normal').map((e) => ({ value: e.id, label: e.name })), 'smile', () => {});
+                const faceInput = el('input', { type: 'file', accept: '.glb' });
+                faceInput.style.display = 'none';
+                faceInput.onchange = () => {
+                    const f = faceInput.files?.[0];
+                    if (f !== undefined)
+                        this.addFaceToEntry(entry, exprSelect.value, f);
+                };
+                out.push(el('div', { className: 'MiiStudioInline' }, [
+                    exprSelect,
+                    button('+ Émotion', () => faceInput.click(), 'Choisis le .glb exporté avec cette émotion'),
+                    faceInput,
+                ]));
+            }
         });
         return out;
     }
@@ -311,7 +389,7 @@ export class MiiPanel extends Panel {
         const out: HTMLElement[] = [section(`Réglages de « ${s.name} »`)];
 
         const animOptions = actor.getAnimationNames().map((a) => ({ value: a, label: animationDisplayName(a) }));
-        const exprOptions = EXPRESSIONS.map((e) => ({ value: e.id, label: e.name }));
+        const exprOptions = actor.getExpressionIds().map((id) => ({ value: id, label: expressionName(id, actor.isImported()) }));
 
         out.push(row('Animation', select(animOptions, base.animation, (v) => { base.animation = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
         out.push(row('Émotion', select(exprOptions, base.expression, (v) => { base.expression = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
@@ -326,8 +404,8 @@ export class MiiPanel extends Panel {
             this.rebuild();
         };
         out.push(row('Corps', select([{ value: 'miitomo', label: 'Miitomo (16 poses)' }, { value: 'wiiu', label: 'Wii U (14 poses)' }], s.bodyModel, (v) => { s.bodyModel = v as BodyModel; reload(); })));
-        out.push(row('Sexe', select([{ value: '0', label: 'Garçon' }, { value: '1', label: 'Fille' }], String(s.gender), (v) => { s.gender = Number(v) as MiiGender; reload(); })));
-        out.push(row('Couleur', select(FAVORITE_COLOR_NAMES.map((n, i) => ({ value: String(i), label: n })), String(s.favoriteColor), (v) => { s.favoriteColor = Number(v); reload(); })));
+        if (!actor.isImported()) out.push(row('Sexe', select([{ value: '0', label: 'Garçon' }, { value: '1', label: 'Fille' }], String(s.gender), (v) => { s.gender = Number(v) as MiiGender; reload(); })));
+        if (!actor.isImported()) out.push(row('Couleur', select(FAVORITE_COLOR_NAMES.map((n, i) => ({ value: String(i), label: n })), String(s.favoriteColor), (v) => { s.favoriteColor = Number(v); reload(); })));
 
         const sync = () => { actor.syncTransform(); this.changed(); };
         const pos = el('div', { className: 'MiiStudioInline' });

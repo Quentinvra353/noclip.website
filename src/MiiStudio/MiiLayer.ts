@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader, GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { FAVORITE_COLORS, MiiGender, MiiInfo } from './MiiData.js';
+import { loadModel } from './MiiStore.js';
 import type { Viewer, ViewerOverlay, ViewerRenderInput } from '../viewer.js';
 
 export type BodyModel = 'miitomo' | 'wiiu';
@@ -85,6 +86,9 @@ export interface MiiActorState {
     size: number;
     visible: boolean;
     steps: MiiStep[];
+    // A full-body model exported from Mi Creator, and one export per extra expression (only its face is used).
+    model?: string;
+    faces?: Record<string, string>;
 }
 
 interface BodyTemplate {
@@ -124,7 +128,123 @@ export class MiiActor {
         this.root.add(this.placeholderHead);
     }
 
+    public isImported(): boolean {
+        return this.state.model !== undefined;
+    }
+
+    public getExpressionIds(): string[] {
+        if (!this.isImported())
+            return EXPRESSIONS.map((e) => e.id);
+        const faces = Object.keys(this.state.faces ?? {});
+        return ['normal', ...faces.filter((f) => f !== 'normal')];
+    }
+
+    private maskMaterial: THREE.MeshStandardMaterial | null = null;
+    private baseMask: THREE.Texture | null = null;
+
+    private async loadImported(): Promise<void> {
+        const template = await this.layer.getBodyTemplate(MiiGender.Male, this.state.bodyModel);
+        const gltf = await this.layer.loadUserModel(this.state.model!);
+        if (this.body !== null)
+            this.bodyGroup.remove(this.body);
+        if (this.head !== null)
+            this.root.remove(this.head);
+        this.head = null;
+
+        this.body = SkeletonUtils.clone(gltf.scene);
+        this.bodyHeight = this.layer.measureHeight(gltf.scene);
+        this.clips.clear();
+        // The exported skeleton has different units and proportions than the animated template,
+        // so translation keys are rescaled per bone and scale keys are dropped.
+        const ratios = new Map<string, number>();
+        template.gltf.scene.traverse((tplBone) => {
+            const bone = this.body!.getObjectByName(tplBone.name);
+            const tplLen = tplBone.position.length();
+            if (bone !== undefined && tplLen > 1e-4)
+                ratios.set(tplBone.name, bone.position.length() / tplLen);
+        });
+        for (const clip of template.gltf.animations) {
+            const c = clip.clone();
+            c.tracks = c.tracks.filter((t) => {
+                const [boneName, prop] = t.name.split('.');
+                if (prop === 'scale')
+                    return false;
+                if (prop === 'position') {
+                    const ratio = ratios.get(boneName);
+                    if (ratio === undefined)
+                        return false;
+                    const values = t.values.slice();
+                    for (let i = 0; i < values.length; i++)
+                        values[i] *= ratio;
+                    t.values = values;
+                }
+                return true;
+            });
+            this.clips.set(c.name, c);
+        }
+
+        this.maskMaterial = null;
+        this.baseMask = null;
+        this.body.traverse((o) => {
+            const mesh = o as THREE.Mesh;
+            if (!mesh.isMesh)
+                return;
+            mesh.frustumCulled = false;
+            const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
+            if (mat.isMeshStandardMaterial) {
+                mat.metalness = 0;
+                mat.roughness = 1;
+            }
+            mesh.material = mat;
+            if (mesh.name === 'Mask') {
+                this.maskMaterial = mat;
+                this.baseMask = mat.map;
+            }
+        });
+
+        this.headBone = null;
+        this.placeholderHead.visible = false;
+        this.bodyGroup.add(this.body);
+        this.mixer = new THREE.AnimationMixer(this.body);
+        this.currentAction = null;
+        this.currentAnimation = null;
+        this.currentExpression = null;
+        this.syncTransform();
+        this.applyStepAt(this.layer.clock, true);
+    }
+
+    private setImportedFace(expression: string): void {
+        if (this.maskMaterial === null)
+            return;
+        const faceId = this.state.faces?.[expression];
+        if (faceId === undefined) {
+            this.maskMaterial.map = this.baseMask;
+            this.maskMaterial.needsUpdate = true;
+            this.currentExpression = expression;
+            return;
+        }
+        const cached = this.layer.getCachedFace(faceId);
+        if (cached !== undefined) {
+            this.maskMaterial.map = cached;
+            this.maskMaterial.needsUpdate = true;
+            this.currentExpression = expression;
+            return;
+        }
+        if (this.loadingExpression === expression || this.failedExpressions.has(expression))
+            return;
+        this.loadingExpression = expression;
+        this.layer.loadFace(faceId).then(() => {
+            this.loadingExpression = null;
+        }, (e: Error) => {
+            this.loadingExpression = null;
+            this.failedExpressions.add(expression);
+            this.layer.onactorerror(this, `${e}`);
+        });
+    }
+
     public async load(): Promise<void> {
+        if (this.isImported())
+            return this.loadImported();
         const template = await this.layer.getBodyTemplate(this.state.gender, this.state.bodyModel);
         if (this.body !== null)
             this.bodyGroup.remove(this.body);
@@ -165,9 +285,13 @@ export class MiiActor {
         this.root.rotation.set(0, s.yaw * Math.PI / 180, 0);
         const scale = s.size / this.bodyHeight;
         this.root.scale.setScalar(scale);
-        const heightFactor = 0.7 + 0.6 * (s.height / 127);
-        const buildFactor = 0.8 + 0.4 * (s.build / 127);
-        this.bodyGroup.scale.set(buildFactor, heightFactor, buildFactor);
+        if (this.isImported()) {
+            this.bodyGroup.scale.setScalar(1);
+        } else {
+            const heightFactor = 0.7 + 0.6 * (s.height / 127);
+            const buildFactor = 0.8 + 0.4 * (s.build / 127);
+            this.bodyGroup.scale.set(buildFactor, heightFactor, buildFactor);
+        }
         this.root.visible = s.visible;
     }
 
@@ -208,6 +332,8 @@ export class MiiActor {
     private setExpression(expression: string): void {
         if (this.currentExpression === expression)
             return;
+        if (this.isImported())
+            return this.setImportedFace(expression);
         const cached = this.layer.getCachedHead(this.state, expression);
         if (cached !== null) {
             this.setHead(cached.clone());
@@ -259,6 +385,9 @@ export class MiiActor {
         if (this.mixer !== null)
             this.mixer.update(dt);
 
+        if (this.isImported())
+            return;
+
         this.root.updateMatrixWorld(true);
         this.placeholderHead.visible = this.head === null && this.headBone !== null;
         if (this.headBone === null)
@@ -307,6 +436,8 @@ export class MiiLayer implements ViewerOverlay {
     private bodyTemplates = new Map<string, Promise<BodyTemplate>>();
     private headCache = new Map<string, THREE.Object3D>();
     private headLoads = new Map<string, Promise<THREE.Object3D>>();
+    private userModels = new Map<string, Promise<GLTF>>();
+    private faceCache = new Map<string, THREE.Texture>();
 
     constructor(private viewer: Viewer) {
         this.canvas = document.createElement('canvas');
@@ -335,6 +466,39 @@ export class MiiLayer implements ViewerOverlay {
     public setLightIntensity(v: number): void {
         this.hemiLight.intensity = v;
         this.dirLight.intensity = v;
+    }
+
+    public measureHeight(obj: THREE.Object3D): number {
+        const box = new THREE.Box3().setFromObject(obj);
+        return Math.max(box.max.y - box.min.y, 1e-3);
+    }
+
+    public loadUserModel(id: string): Promise<GLTF> {
+        let p = this.userModels.get(id);
+        if (p === undefined) {
+            p = loadModel(id).then((data) => this.loader.parseAsync(data, ''));
+            p.catch(() => this.userModels.delete(id));
+            this.userModels.set(id, p);
+        }
+        return p;
+    }
+
+    public getCachedFace(id: string): THREE.Texture | undefined {
+        return this.faceCache.get(id);
+    }
+
+    public async loadFace(id: string): Promise<THREE.Texture> {
+        const gltf = await this.loadUserModel(id);
+        let map: THREE.Texture | null = null;
+        gltf.scene.traverse((o) => {
+            const mesh = o as THREE.Mesh;
+            if (mesh.isMesh && mesh.name === 'Mask')
+                map = (mesh.material as THREE.MeshStandardMaterial).map;
+        });
+        if (map === null)
+            throw new Error(`Pas de visage trouvé dans ce modèle 3D.`);
+        this.faceCache.set(id, map);
+        return map;
     }
 
     public getBodyTemplate(gender: MiiGender, model: BodyModel): Promise<BodyTemplate> {
@@ -418,8 +582,13 @@ export class MiiLayer implements ViewerOverlay {
     public async prepareForRecording(): Promise<void> {
         const loads: Promise<unknown>[] = [];
         for (const actor of this.actors)
-            for (const step of actor.state.steps)
-                loads.push(this.loadHead(actor.state, step.expression).catch(() => null));
+            for (const step of actor.state.steps) {
+                const faceId = actor.state.faces?.[step.expression];
+                if (faceId !== undefined)
+                    loads.push(this.loadFace(faceId).catch(() => null));
+                else if (!actor.isImported())
+                    loads.push(this.loadHead(actor.state, step.expression).catch(() => null));
+            }
         await Promise.all(loads);
         this.resetClock();
     }
