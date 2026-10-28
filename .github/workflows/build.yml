@@ -40,14 +40,27 @@ jobs:
 
     - name: Run build
       run: pnpm run build
+      env:
+        ASSET_PREFIX: ./
 
-    - name: Deploy
+    - name: Upload site
       if: github.ref == 'refs/heads/main'
-      uses: burnett01/rsync-deployments@9.0.2
+      uses: actions/upload-pages-artifact@v3
       with:
-        switches: -va --delete-after --exclude=data/ --exclude=priv/ --exclude=.well-known/
         path: dist/
-        remote_path: noclip.website/
-        remote_host: iad1-shared-e1-29.dreamhost.com
-        remote_user: gznoclip
-        remote_key: ${{ secrets.DEPLOY_KEY }}
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - name: Deploy
+      id: deployment
+      uses: actions/deploy-pages@v4

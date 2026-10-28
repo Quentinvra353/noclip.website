@@ -122,6 +122,7 @@ import * as Scenes_KingdomHeartsBBS from './KingdomHeartsDDD/scenes_bbs.js';
 import { DroppedFileSceneDesc, traverseFileSystemDataTransfer } from './Scenes_FileDrops.js';
 
 import { UI, Panel } from './ui.js';
+import { MiiPanel } from './MiiStudio/MiiPanel.js';
 import { Camera, FPSCameraController } from './Camera.js';
 import { assertExists, assert } from './util.js';
 import { loadRustLib } from './rustlib.js';
@@ -1064,6 +1065,7 @@ class Main {
 
     private _makeUI() {
         this.ui = new UI(this.viewer);
+        this.ui.setMiiPanel(new MiiPanel());
         this.ui.setEmbedMode(this.isEmbedMode);
         this.toplevel.appendChild(this.ui.elem);
         this.ui.sceneSelect.onscenedescselected = this._onSceneDescSelected.bind(this);

@@ -3907,6 +3907,7 @@ class VideoRecorder {
     private bitrate = 4e7;
 
     public aborted = false;
+    private compositeCanvas: HTMLCanvasElement | null = null;
 
     constructor(private viewer: Viewer.Viewer, private cameraController: CameraAnimationManager) {
         const width = viewer.canvas.width;
@@ -3934,7 +3935,30 @@ class VideoRecorder {
         });
     }
 
+    private getFrameSource(): HTMLCanvasElement {
+        const overlays = this.viewer.overlays;
+        if (overlays.length === 0)
+            return this.viewer.canvas;
+
+        if (this.compositeCanvas === null) {
+            this.compositeCanvas = document.createElement('canvas');
+            this.compositeCanvas.width = this.viewer.canvas.width;
+            this.compositeCanvas.height = this.viewer.canvas.height;
+        }
+        const ctx = this.compositeCanvas.getContext('2d')!;
+        const w = this.compositeCanvas.width, h = this.compositeCanvas.height;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(this.viewer.canvas, 0, 0, w, h);
+        for (let i = 0; i < overlays.length; i++)
+            ctx.drawImage(overlays[i].canvas, 0, 0, w, h);
+        return this.compositeCanvas;
+    }
+
     public async render() {
+        for (const overlay of this.viewer.overlays)
+            if (overlay.prepareForRecording !== undefined)
+                await overlay.prepareForRecording();
+
         const mspf = 1000 / this.framerate;
         const frameCount = Math.ceil(this.cameraController.durationMs / mspf);
 
@@ -3955,7 +3979,7 @@ class VideoRecorder {
             this.viewer.update(updateInfo);
             updateInfo.time += mspf;
 
-            const videoFrame = new VideoFrame(this.viewer.canvas, { timestamp });
+            const videoFrame = new VideoFrame(this.getFrameSource(), { timestamp });
             timestamp += mspf * 1000; // microseconds
 
             // Force a keyframe every second
