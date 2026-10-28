@@ -10,6 +10,7 @@
     "@types/parseurl": "^1.3.3",
     "@types/pngjs": "^6.0.5",
     "@types/send": "^0.17.5",
+    "@types/three": "0.169.0",
     "@types/webxr": "^0.5.22",
     "@webgpu/types": "^0.1.64",
     "@xmldom/xmldom": "^0.9.8",
@@ -28,6 +29,7 @@
     "gl-matrix": "3.4.3",
     "librw": "^0.4.0",
     "reflect-metadata": "^0.2.2",
+    "three": "0.169.0",
     "tiff": "^6.2.0"
   },
   "scripts": {
@@ -57,7 +59,9 @@
         "rsbuild.config.ts",
         "tsconfig.json"
       ],
-      "dependencies": ["build:wasm-release"]
+      "dependencies": [
+        "build:wasm-release"
+      ]
     },
     "start": {
       "command": "rsbuild dev",

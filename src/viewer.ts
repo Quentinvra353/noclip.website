@@ -61,6 +61,12 @@ export interface SceneGfx {
 
 export type Listener = (viewer: Viewer) => void;
 
+export interface ViewerOverlay {
+    canvas: HTMLCanvasElement;
+    render(renderInput: ViewerRenderInput): void;
+    prepareForRecording?(): Promise<void>;
+}
+
 function resetGfxStatisticsGroup(group: GfxStatisticsGroup): void {
     group.bufferUploadCount = 0;
     group.drawCallCount = 0;
@@ -101,6 +107,7 @@ export class Viewer {
     public renderStatisticsTracker = new RenderStatisticsTracker();
 
     public scene: SceneGfx | null = null;
+    public overlays: ViewerOverlay[] = [];
 
     public oncamerachanged: (force: boolean) => void = (() => {});
     public onstatistics: (statistics: RenderStatistics) => void = (() => {});
@@ -171,6 +178,9 @@ export class Viewer {
 
         this.gfxDevice.setStatisticsGroup(null);
         this.gfxDevice.endFrame();
+
+        for (let i = 0; i < this.overlays.length; i++)
+            this.overlays[i].render(this.viewerRenderInput);
 
         const renderStatistics = this.renderStatisticsTracker.endFrame();
         this.finishRenderStatistics(renderStatistics, this.statisticsGroup);

@@ -838,7 +838,7 @@ export class Panel implements Widget {
         }
     }
 
-    private syncSize() {
+    protected syncSize() {
         const widthExpanded = this.expanded || this.mainPanel.matches(':hover');
         this.mainPanel.style.width = widthExpanded ? '440px' : '28px';
 
@@ -2758,6 +2758,12 @@ class PlayPauseButton extends SingleIconButton {
     }
 }
 
+export interface ScenePanelExtension extends Panel {
+    setViewer(viewer: Viewer.Viewer): void;
+    onSceneChange(): void;
+    onSceneDestroyed(): void;
+}
+
 export class UI {
     public elem: HTMLElement;
 
@@ -2778,6 +2784,7 @@ export class UI {
     private about: About;
     private studioSidePanel: StudioSidePanel;
     private studioPanel: StudioPanel;
+    public miiPanel: ScenePanelExtension | null = null;
 
     public cameraSpeedIndicator = new CameraSpeedIndicator();
     private bottomBar = new BottomBar();
@@ -2873,6 +2880,11 @@ export class UI {
         this.elem = this.toplevel;
     }
 
+    public setMiiPanel(panel: ScenePanelExtension): void {
+        this.miiPanel = panel;
+        panel.setViewer(this.viewer);
+    }
+
     public setViewer(viewer: Viewer.Viewer): void {
         if (this.viewer === viewer)
             return;
@@ -2880,6 +2892,7 @@ export class UI {
         this.viewer = viewer;
         this.viewerSettings.setViewer(this.viewer);
         this.studioPanel.setViewer(this.viewer);
+        this.miiPanel?.setViewer(this.viewer);
 
         this.xrSettings = new XRSettings(this, this.viewer);
     }
@@ -2919,6 +2932,9 @@ export class UI {
 
         if (this.viewer.scene !== null && this.studioModeEnabled)
             this.studioPanel.onSceneChange();
+
+        if (this.viewer.scene !== null)
+            this.miiPanel?.onSceneChange();
     }
 
     private setPanels(panels: Panel[]): void {
@@ -2927,6 +2943,7 @@ export class UI {
     }
 
     public destroyScene(): void {
+        this.miiPanel?.onSceneDestroyed();
         this.setScenePanels([]);
         setChildren(this.sceneUIContainer, []);
         this.debugFloaterHolder.destroyScene();
@@ -2944,7 +2961,7 @@ export class UI {
         this.setHasScene(scenePanels !== null);
 
         if (scenePanels !== null) {
-            this.setPanels([this.sceneSelect, ...scenePanels, this.textureViewer, this.viewerSettings, this.xrSettings, this.statisticsPanel, this.studioSidePanel, this.about]);
+            this.setPanels([this.sceneSelect, ...(this.miiPanel !== null ? [this.miiPanel] : []), ...scenePanels, this.textureViewer, this.viewerSettings, this.xrSettings, this.statisticsPanel, this.studioSidePanel, this.about]);
         } else {
             this.setPanels([this.sceneSelect, this.about]);
         }
