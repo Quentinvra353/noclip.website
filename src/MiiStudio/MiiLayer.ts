@@ -4,6 +4,8 @@ import { GLTFLoader, GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { FAVORITE_COLORS, MiiGender, MiiInfo } from './MiiData.js';
 import { loadModel } from './MiiStore.js';
+import { DepthCapture } from './DepthCapture.js';
+import { vec3 } from 'gl-matrix';
 import type { Viewer, ViewerOverlay, ViewerRenderInput } from '../viewer.js';
 
 export type BodyModel = 'miitomo' | 'wiiu';
@@ -107,6 +109,50 @@ export interface LightSettings {
     shadowOpacity: number;
 }
 
+// Uniforms shared by every shadow plane, filled from the scenery depth snapshot.
+const depthUniforms = {
+    uMiiDepth: { value: null as THREE.Texture | null },
+    uMiiClipFromWorld: { value: new THREE.Matrix4() },
+    uMiiWorldFromClip: { value: new THREE.Matrix4() },
+    uMiiDepthNegOne: { value: 0 },
+    uMiiDepthEnabled: { value: 0 },
+};
+
+// A shadow catcher that only keeps the fragments lying on the scenery, so no shadow is drawn over the void.
+function createShadowMaterial(): THREE.ShadowMaterial {
+    const mat = new THREE.ShadowMaterial({ opacity: DEFAULT_LIGHT.shadowOpacity, depthWrite: false });
+    const tolerance = { value: 1 };
+    mat.userData.tolerance = tolerance;
+    mat.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, depthUniforms, { uMiiTolerance: tolerance });
+        shader.vertexShader = shader.vertexShader
+            .replace('void main() {', 'varying vec3 vMiiWorld;\nvoid main() {')
+            .replace('#include <project_vertex>', '#include <project_vertex>\n\tvMiiWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        shader.fragmentShader = shader.fragmentShader
+            .replace('void main() {', `
+varying vec3 vMiiWorld;
+uniform sampler2D uMiiDepth;
+uniform mat4 uMiiClipFromWorld;
+uniform mat4 uMiiWorldFromClip;
+uniform float uMiiDepthNegOne;
+uniform float uMiiDepthEnabled;
+uniform float uMiiTolerance;
+void main() {
+\tif (uMiiDepthEnabled > 0.5) {
+\t\tvec4 c = uMiiClipFromWorld * vec4(vMiiWorld, 1.0);
+\t\tif (c.w <= 0.0) discard;
+\t\tvec3 n = c.xyz / c.w;
+\t\tvec2 uv = n.xy * 0.5 + 0.5;
+\t\tif (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
+\t\tfloat d = texture2D(uMiiDepth, uv).r;
+\t\tif (d <= 0.0) discard;
+\t\tvec4 m = uMiiWorldFromClip * vec4(n.xy, uMiiDepthNegOne > 0.5 ? d * 2.0 - 1.0 : d, 1.0);
+\t\tif (distance(m.xyz / m.w, vMiiWorld) > uMiiTolerance) discard;
+\t}`);
+    };
+    return mat;
+}
+
 export const DEFAULT_LIGHT: LightSettings = {
     intensity: 1.6, azimuth: 30, elevation: 60, color: '#ffffff', ambient: 1.6, shadow: true, shadowOpacity: 0.45,
 };
@@ -173,7 +219,7 @@ export class MiiActor {
         this.placeholderHead = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshLambertMaterial({ color: 0xF0C8A0 }));
         this.placeholderHead.visible = false;
         this.root.add(this.placeholderHead);
-        this.shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.ShadowMaterial({ opacity: DEFAULT_LIGHT.shadowOpacity, depthWrite: false }));
+        this.shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), createShadowMaterial());
         this.shadowPlane.rotation.x = -Math.PI / 2;
         this.shadowPlane.receiveShadow = true;
         this.shadowPlane.frustumCulled = false;
@@ -340,7 +386,8 @@ export class MiiActor {
         const scale = s.size / this.bodyHeight;
         this.root.scale.setScalar(scale);
         // Big enough for long shadows from a low light.
-        this.shadowPlane.scale.setScalar(this.bodyHeight * 6);
+        this.shadowPlane.scale.setScalar(this.bodyHeight * 8);
+        (this.shadowPlane.material.userData.tolerance as { value: number }).value = s.size * 0.08;
         this.shadowPlane.position.y = this.bodyHeight * 0.002;
         if (this.isImported()) {
             this.bodyGroup.scale.setScalar(1);
@@ -484,6 +531,15 @@ export class MiiLayer implements ViewerOverlay {
     public rendererURL = DEFAULT_RENDERER_URL;
     public onactorerror: (actor: MiiActor, error: string) => void = () => {};
     public onclock: (time: number) => void = () => {};
+    // Mouse placement: drag the Miis around, optionally stuck to the scenery under the cursor.
+    public moveMode = false;
+    public magnet = true;
+    public onactormoved: (actor: MiiActor, done: boolean) => void = () => {};
+    public depth: DepthCapture;
+    private depthTexture: THREE.DataTexture | null = null;
+    private depthSerial = -1;
+    private raycaster = new THREE.Raycaster();
+    private drag: { actor: MiiActor, plane: THREE.Plane, offset: THREE.Vector3, vertical: boolean } | null = null;
 
     private renderer: THREE.WebGLRenderer;
     private scene = new THREE.Scene();
@@ -525,6 +581,163 @@ export class MiiLayer implements ViewerOverlay {
 
         viewer.canvas.insertAdjacentElement('afterend', this.canvas);
         viewer.overlays.push(this);
+
+        this.depth = new DepthCapture(viewer.gfxDevice, viewer);
+        depthUniforms.uMiiDepthNegOne.value = 0;
+        window.addEventListener('mousedown', this.onMouseDown, { capture: true });
+        window.addEventListener('mousemove', this.onMouseMove, { capture: true });
+        window.addEventListener('mouseup', this.onMouseUp, { capture: true });
+    }
+
+    private mouseNDC(e: MouseEvent): THREE.Vector2 | null {
+        const rect = this.viewer.canvas.getBoundingClientRect();
+        if (e.clientX < rect.left || e.clientY < rect.top || e.clientX > rect.right || e.clientY > rect.bottom)
+            return null;
+        return new THREE.Vector2((e.clientX - rect.left) / rect.width * 2 - 1, -((e.clientY - rect.top) / rect.height * 2 - 1));
+    }
+
+    private actorAt(ndc: THREE.Vector2): { actor: MiiActor, point: THREE.Vector3 } | null {
+        this.raycaster.setFromCamera(ndc, this.camera);
+        let best: { actor: MiiActor, point: THREE.Vector3 } | null = null, bestDist = Infinity;
+        for (const actor of this.actors) {
+            if (!actor.state.visible)
+                continue;
+            actor.shadowPlane.visible = false;
+            const hits = this.raycaster.intersectObject(actor.root, true);
+            if (hits.length > 0 && hits[0].distance < bestDist) {
+                bestDist = hits[0].distance;
+                best = { actor, point: hits[0].point };
+            }
+        }
+        return best;
+    }
+
+    // Scenery under the cursor, from the depth snapshot.
+    // On a wall, the Mii climbs onto the ledge above it if there's one within its height.
+    public pickScenery(ndcX: number, ndcY: number, size: number = 0): [number, number, number] | null {
+        const v = vec3.create();
+        if (!this.depth.pick(v, ndcX, ndcY))
+            return null;
+        const up = this.depth.surfaceUpness(ndcX, ndcY);
+        if (size > 0 && up !== null && up < 0.6) {
+            const y = this.depth.findGroundBelow(v[0], v[1] + size, v[2], size * 1.5, size * 0.5);
+            if (y !== null)
+                return [v[0], y, v[2]];
+        }
+        return [v[0], v[1], v[2]];
+    }
+
+    private onMouseDown = (e: MouseEvent): void => {
+        if (!this.moveMode || e.button !== 0 || e.target !== this.viewer.canvas)
+            return;
+        const ndc = this.mouseNDC(e);
+        if (ndc === null)
+            return;
+        const hit = this.actorAt(ndc);
+        if (hit === null)
+            return;
+        e.stopPropagation();
+        e.preventDefault();
+        const actor = hit.actor;
+        const origin = new THREE.Vector3().fromArray(actor.state.position);
+        // Shift moves up and down, on a vertical plane facing the camera.
+        let plane: THREE.Plane;
+        if (e.shiftKey) {
+            const camDir = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 2).setY(0);
+            if (camDir.lengthSq() < 1e-6)
+                camDir.set(0, 0, 1);
+            plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir.normalize(), hit.point);
+        } else {
+            plane = new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), origin);
+        }
+        const start = new THREE.Vector3();
+        this.raycaster.setFromCamera(ndc, this.camera);
+        if (this.raycaster.ray.intersectPlane(plane, start) === null)
+            start.copy(origin);
+        this.drag = { actor, plane, offset: origin.clone().sub(start), vertical: e.shiftKey };
+        this.viewer.canvas.style.cursor = 'grabbing';
+        this.onactormoved(actor, false);
+    };
+
+    private onMouseMove = (e: MouseEvent): void => {
+        if (this.drag === null) {
+            if (this.moveMode && e.target === this.viewer.canvas && e.buttons === 0) {
+                const ndc = this.mouseNDC(e);
+                this.viewer.canvas.style.cursor = ndc !== null && this.actorAt(ndc) !== null ? 'grab' : '';
+            }
+            return;
+        }
+        e.stopPropagation();
+        const ndc = this.mouseNDC(e);
+        if (ndc === null)
+            return;
+        const { actor, plane, offset, vertical } = this.drag;
+        const s = actor.state;
+        if (this.magnet && !vertical) {
+            // Stuck to the scenery: over the void, the Mii just waits at its last spot.
+            const p = this.pickScenery(ndc.x, ndc.y, s.size);
+            if (p !== null) {
+                s.position = p;
+                actor.syncTransform();
+            }
+            return;
+        }
+        const point = new THREE.Vector3();
+        this.raycaster.setFromCamera(ndc, this.camera);
+        if (this.raycaster.ray.intersectPlane(plane, point) === null)
+            return;
+        point.add(offset);
+        if (vertical)
+            s.position = [s.position[0], point.y, s.position[2]];
+        else
+            s.position = [point.x, s.position[1], point.z];
+        actor.syncTransform();
+    };
+
+    private onMouseUp = (e: MouseEvent): void => {
+        if (this.drag === null)
+            return;
+        e.stopPropagation();
+        const actor = this.drag.actor;
+        this.drag = null;
+        this.viewer.canvas.style.cursor = '';
+        this.onactormoved(actor, true);
+    };
+
+    // Drops a Mii onto the scenery below it (only works where that ground is on screen).
+    public dropToGround(actor: MiiActor): boolean {
+        const s = actor.state;
+        const y = this.depth.findGroundBelow(s.position[0], s.position[1] + s.size * 0.5, s.position[2], s.size * 20, s.size * 0.5);
+        if (y === null)
+            return false;
+        s.position = [s.position[0], y, s.position[2]];
+        actor.syncTransform();
+        return true;
+    }
+
+    private updateDepthUniforms(): void {
+        const snap = this.depth.snapshot;
+        if (snap === null) {
+            depthUniforms.uMiiDepthEnabled.value = 0;
+            return;
+        }
+        if (snap.serial !== this.depthSerial) {
+            this.depthSerial = snap.serial;
+            if (this.depthTexture === null || this.depthTexture.image.width !== snap.width || this.depthTexture.image.height !== snap.height) {
+                this.depthTexture?.dispose();
+                this.depthTexture = new THREE.DataTexture(snap.depth as Float32Array<ArrayBuffer>, snap.width, snap.height, THREE.RedFormat, THREE.FloatType);
+                this.depthTexture.minFilter = THREE.NearestFilter;
+                this.depthTexture.magFilter = THREE.NearestFilter;
+            } else {
+                (this.depthTexture.image as unknown as { data: Float32Array }).data = snap.depth;
+            }
+            this.depthTexture.needsUpdate = true;
+            depthUniforms.uMiiDepth.value = this.depthTexture;
+            depthUniforms.uMiiClipFromWorld.value.fromArray(snap.clipFromWorld as Float32Array);
+            depthUniforms.uMiiWorldFromClip.value.fromArray(snap.worldFromClip as Float32Array);
+            depthUniforms.uMiiDepthNegOne.value = snap.nearZNegativeOne ? 1 : 0;
+        }
+        depthUniforms.uMiiDepthEnabled.value = 1;
     }
 
     public setLight(light: LightSettings): void {
@@ -696,6 +909,9 @@ export class MiiLayer implements ViewerOverlay {
         this.canvas.style.width = this.viewer.canvas.style.width;
         this.canvas.style.height = this.viewer.canvas.style.height;
 
+        this.depth.endFrame();
+        this.updateDepthUniforms();
+
         const dt = this.playing ? viewerInput.deltaTime / 1000 : 0;
         if (dt > 0) {
             this.clock += dt;
@@ -727,6 +943,11 @@ export class MiiLayer implements ViewerOverlay {
     }
 
     public destroy(): void {
+        window.removeEventListener('mousedown', this.onMouseDown, { capture: true });
+        window.removeEventListener('mousemove', this.onMouseMove, { capture: true });
+        window.removeEventListener('mouseup', this.onMouseUp, { capture: true });
+        this.depth.destroy();
+        this.depthTexture?.dispose();
         this.clearActors();
         const i = this.viewer.overlays.indexOf(this);
         if (i >= 0)

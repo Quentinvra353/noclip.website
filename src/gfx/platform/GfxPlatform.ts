@@ -464,6 +464,8 @@ export interface GfxDevice {
     // Readback system.
     readBuffer(o: GfxReadback, dstOffset: number, buffer: GfxBuffer, srcOffset: number, byteSize: number): void;
     readPixelFromTexture(o: GfxReadback, dstOffset: number, a: GfxTexture, x: number, y: number): void;
+    // Optional: reads a whole rectangle of pixels at once (WebGL2 only for now).
+    readPixelsFromTexture?(o: GfxReadback, dstOffset: number, a: GfxTexture, x: number, y: number, w: number, h: number): void;
     submitReadback(o: GfxReadback): void;
 
     /**

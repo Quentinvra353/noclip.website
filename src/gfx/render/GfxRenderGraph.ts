@@ -535,6 +535,41 @@ class GfxrDebugThumbnailDesc {
     }
 }
 
+/**
+ * Called before a graph that resolves to an external texture (usually the onscreen one) executes,
+ * with the depth target that most of its passes used. Lets overlays see the scene's depth.
+ */
+export const gfxrRenderGraphHooks: {
+    onExecuteMainGraph: ((builder: GfxrGraphBuilder, mainDepthTargetID: GfxrRenderTargetID) => void) | null,
+    // When set, only a graph that resolves to this texture counts as the main graph.
+    mainOutputTexture: GfxTexture | null,
+} = {
+    onExecuteMainGraph: null,
+    mainOutputTexture: null,
+};
+
+function findMainDepthTargetID(graph: GraphImpl): GfxrRenderTargetID | null {
+    const output = gfxrRenderGraphHooks.mainOutputTexture;
+    if (!graph.passes.some((pass) => pass.resolveOutputExternalTexture.some((t) => t !== undefined && t !== null && (output === null || t === output))))
+        return null;
+    const useCount = new Map<GfxrRenderTargetID, number>();
+    for (const pass of graph.passes) {
+        const id = pass.attachmentRenderTargetID[GfxrAttachmentSlot.DepthStencil];
+        if (id !== undefined)
+            useCount.set(id, (useCount.get(id) ?? 0) + 1);
+    }
+    let best: GfxrRenderTargetID | null = null, bestScore = -1;
+    for (const [id, count] of useCount) {
+        const desc = graph.renderTargetDescriptions[id];
+        const score = count * 1e8 + desc.width * desc.height;
+        if (score > bestScore) {
+            best = id;
+            bestScore = score;
+        }
+    }
+    return best;
+}
+
 export class GfxrRenderGraphImpl implements GfxrRenderGraph, GfxrGraphBuilder, GfxrGraphBuilderDebug, GfxrPassScope {
     private currentPass: PassImpl | null = null;
 
@@ -548,6 +583,11 @@ export class GfxrRenderGraphImpl implements GfxrRenderGraph, GfxrGraphBuilder, G
     }
 
     public execute(): void {
+        if (gfxrRenderGraphHooks.onExecuteMainGraph !== null) {
+            const depthID = findMainDepthTargetID(assertExists(this.currentGraph));
+            if (depthID !== null)
+                gfxrRenderGraphHooks.onExecuteMainGraph(this, depthID);
+        }
         const graph = assertExists(this.currentGraph);
         this.execGraph(graph);
         this.currentGraph = null;

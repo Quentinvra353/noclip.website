@@ -1527,6 +1527,22 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     }
 
+    public readPixelsFromTexture(o: GfxReadback, dstOffset: number, a: GfxTexture, x: number, y: number, w: number, h: number): void {
+        const gl = this.gl;
+        const readback = o as GfxReadbackP_GL;
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._readbackFramebuffer);
+        const texture = a as GfxTextureP_GL;
+        gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture.gl_texture, 0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, readback.gl_buffer);
+
+        const gl_format = this.translateTextureFormat(texture.pixelFormat);
+        const gl_type = this.translateTextureType(texture.pixelFormat);
+        const formatByteSize = getFormatByteSize(texture.pixelFormat);
+
+        gl.readPixels(x, y, w, h, gl_format, gl_type, dstOffset * formatByteSize);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    }
+
     public submitReadback(o: GfxReadback): void {
         const gl = this.gl;
         const readback = o as GfxReadbackP_GL;
