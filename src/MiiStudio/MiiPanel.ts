@@ -4,6 +4,7 @@ import type { Viewer } from '../viewer.js';
 import { GlobalSaveManager } from '../SaveManager.js';
 import { FAVORITE_COLOR_NAMES, MiiGender, parseMiiData } from './MiiData.js';
 import { saveModel } from './MiiStore.js';
+import { studioVideoSettings, VideoRecorder } from '../Studio.js';
 import { ALT_RENDERER_URL, animationDisplayName, animationSortKey, BodyModel, DEFAULT_LIGHT, DEFAULT_RENDERER_URL, EXPRESSIONS, LightSettings, MiiActor, MiiActorState, MiiLayer } from './MiiLayer.js';
 
 const MII_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" height="20" fill="white"><circle cx="12" cy="7" r="5"/><path d="M4 23c0-5 3.6-8.5 8-8.5s8 3.5 8 8.5z"/></svg>`;
@@ -11,6 +12,15 @@ const MII_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" he
 const LIBRARY_KEY = 'MiiStudio_Library';
 const SETTINGS_KEY = 'MiiStudio_Settings';
 const SCENE_KEY_PREFIX = 'MiiStudio_Scene_';
+
+type VideoFormat = 'landscape' | 'portrait' | 'window';
+
+interface VideoSettings {
+    format: VideoFormat;
+    framerate: number;
+    // Seconds; 0 means "until the end of the sequence".
+    duration: number;
+}
 
 interface LibraryEntry {
     name: string;
@@ -94,14 +104,17 @@ export class MiiPanel extends Panel {
     private messageElem: HTMLElement;
     private clockElem: HTMLElement;
     private bodyElem: HTMLElement;
-    private settings: { rendererURL: string, lightSettings: LightSettings, magnet: boolean } = (() => {
-        const saved = loadJSON<{ rendererURL?: string, light?: number, lightSettings?: Partial<LightSettings>, magnet?: boolean }>(SETTINGS_KEY, {});
+    private settings: { rendererURL: string, lightSettings: LightSettings, magnet: boolean, video: VideoSettings } = (() => {
+        const saved = loadJSON<{ rendererURL?: string, light?: number, lightSettings?: Partial<LightSettings>, magnet?: boolean, video?: Partial<VideoSettings> }>(SETTINGS_KEY, {});
         const lightSettings = { ...DEFAULT_LIGHT, ...saved.lightSettings };
         if (saved.lightSettings === undefined && saved.light !== undefined)
             lightSettings.intensity = lightSettings.ambient = saved.light;
-        return { rendererURL: saved.rendererURL ?? DEFAULT_RENDERER_URL, lightSettings, magnet: saved.magnet ?? true };
+        return { rendererURL: saved.rendererURL ?? DEFAULT_RENDERER_URL, lightSettings, magnet: saved.magnet ?? true,
+            video: { format: 'landscape', framerate: 60, duration: 0, ...saved.video } };
     })();
     // Emotion picked for an imported Mii that has no face for it yet, waiting for its export file.
+    private alignTarget: MiiActor | null = null;
+    private recorder: VideoRecorder | null = null;
     private pendingFace: { actor: MiiActor, expression: string, apply: (expression: string) => void } | null = null;
 
     constructor() {
@@ -457,6 +470,22 @@ export class MiiPanel extends Panel {
         return out;
     }
 
+    // Puts the actor next to the target, on the same line, looking the same way.
+    private placeBeside(actor: MiiActor, target: MiiActor, side: number): void {
+        const t = target.state, yaw = t.yaw * Math.PI / 180;
+        // The target's left, seen from the target, is +X turned by its yaw.
+        const gap = Math.max(t.size, actor.state.size) * 0.8 * side;
+        actor.state.position = [t.position[0] + Math.cos(yaw) * gap, t.position[1], t.position[2] - Math.sin(yaw) * gap];
+        actor.state.yaw = t.yaw;
+    }
+
+    private placeFacing(actor: MiiActor, target: MiiActor): void {
+        const t = target.state, yaw = t.yaw * Math.PI / 180;
+        const dist = Math.max(t.size, actor.state.size) * 1.2;
+        actor.state.position = [t.position[0] + Math.sin(yaw) * dist, t.position[1], t.position[2] + Math.cos(yaw) * dist];
+        actor.state.yaw = t.yaw + 180;
+    }
+
     private buildSelected(): HTMLElement[] {
         const actor = this.selected;
         if (actor === null || !this.layer!.actors.includes(actor))
@@ -513,9 +542,80 @@ export class MiiPanel extends Panel {
             button('▼', () => { s.position[1] -= step; sync(); this.rebuild(); }, 'Descendre'),
         ])));
 
-        const yaw = el('input', { type: 'range', min: '-180', max: '180', step: '1', value: String(Math.round(((s.yaw + 180) % 360 + 360) % 360 - 180)) });
-        yaw.oninput = () => { s.yaw = parseFloat(yaw.value); sync(); };
-        out.push(row('Rotation', yaw));
+        const normYaw = (v: number) => ((v + 180) % 360 + 360) % 360 - 180;
+        const yaw = el('input', { type: 'range', min: '-180', max: '180', step: '1', value: String(Math.round(normYaw(s.yaw))) });
+        const yawNum = numberInput(normYaw(s.yaw), 1, (v) => { s.yaw = normYaw(v); yaw.value = String(Math.round(s.yaw)); sync(); });
+        yaw.oninput = () => { s.yaw = parseFloat(yaw.value); yawNum.value = yaw.value; sync(); };
+        yaw.style.flex = '1';
+        out.push(row('Rotation', el('div', { className: 'MiiStudioInline' }, [yaw, yawNum])));
+        const turn = (f: (v: number) => number) => () => { s.yaw = normYaw(f(s.yaw)); sync(); this.rebuild(); };
+        out.push(row('', el('div', { className: 'MiiStudioInline' }, [
+            button('↺ 90°', turn((v) => v + 90)),
+            button('↻ 90°', turn((v) => v - 90)),
+            button('Demi-tour', turn((v) => v + 180)),
+            button('Arrondir à 45°', turn((v) => Math.round(v / 45) * 45), 'Met la rotation pile sur 0, 45, 90°…'),
+        ])));
+
+        // Look at something: the Mii's front is +Z, turned by its yaw around the vertical axis.
+        const faceTowards = (x: number, z: number) => {
+            const dx = x - s.position[0], dz = z - s.position[2];
+            if (Math.hypot(dx, dz) > 1e-6)
+                s.yaw = normYaw(Math.atan2(dx, dz) * 180 / Math.PI);
+            sync();
+            this.rebuild();
+        };
+        const others = this.layer!.actors.filter((a) => a !== actor);
+        const cam = this.viewer!.camera.worldMatrix;
+        const lookButtons: HTMLElement[] = [
+            button('La caméra', () => faceTowards(cam[12], cam[14])),
+            button('Un point du décor…', () => {
+                this.setMessage('Clique sur l\'endroit que le Mii doit regarder (une porte, un objet…).');
+                this.viewer!.canvas.style.cursor = 'crosshair';
+                this.layer!.pendingPick = (p) => {
+                    if (p === null) {
+                        this.setMessage('Pas de décor à cet endroit.');
+                        return;
+                    }
+                    this.setMessage('');
+                    faceTowards(p[0], p[2]);
+                };
+            }),
+        ];
+        out.push(row('Regarder vers', el('div', { className: 'MiiStudioInline' }, lookButtons)));
+
+        if (others.length > 0) {
+            if (this.alignTarget === null || !others.includes(this.alignTarget))
+                this.alignTarget = others[0];
+            const target = this.alignTarget;
+            const targetSelect = select(others.map((a, i) => ({ value: String(i), label: a.state.name })), String(others.indexOf(target)), (v) => {
+                this.alignTarget = others[Number(v)];
+                this.rebuild();
+            });
+            out.push(row('Avec le Mii', targetSelect));
+            const t = target.state;
+            const align = (f: () => void) => () => { f(); sync(); this.rebuild(); };
+            out.push(row('', el('div', { className: 'MiiStudioInline' }, [
+                button('Regarder', () => faceTowards(t.position[0], t.position[2]), 'Tourne ce Mii vers l\'autre'),
+                button('Face à face', () => {
+                    faceTowards(t.position[0], t.position[2]);
+                    t.yaw = normYaw(s.yaw + 180);
+                    target.syncTransform();
+                    this.changed();
+                }, 'Les deux Mii se regardent'),
+                button('Même rotation', align(() => { s.yaw = t.yaw; })),
+            ])));
+            out.push(row('Aligner', el('div', { className: 'MiiStudioInline' }, [
+                button('Même X', align(() => { s.position = [t.position[0], s.position[1], s.position[2]]; })),
+                button('Même Z', align(() => { s.position = [s.position[0], s.position[1], t.position[2]]; })),
+                button('Même hauteur', align(() => { s.position = [s.position[0], t.position[1], s.position[2]]; })),
+                button('Même taille', align(() => { s.size = t.size; })),
+            ])));
+            out.push(row('Côte à côte', el('div', { className: 'MiiStudioInline' }, [
+                button('À sa gauche', align(() => this.placeBeside(actor, target, 1))),
+                button('À sa droite', align(() => this.placeBeside(actor, target, -1))),
+                button('En face', align(() => this.placeFacing(actor, target))),
+            ])));
+        }
 
         out.push(row('Taille', el('div', { className: 'MiiStudioInline' }, [
             numberInput(s.size, s.size / 10, (v) => { if (v > 0) { s.size = v; sync(); } }),
@@ -557,7 +657,35 @@ export class MiiPanel extends Panel {
             playBtn,
             this.clockElem,
         ]));
-        out.push(el('div', { textContent: 'L\'enregistrement vidéo du mode Studio inclut les Mii et rejoue leur séquence depuis 0.' }));
+
+        out.push(section('Vidéo'));
+        const vs = this.settings.video;
+        const saveVideo = () => {
+            studioVideoSettings.width = vs.format === 'window' ? 0 : vs.format === 'portrait' ? 1080 : 1920;
+            studioVideoSettings.height = vs.format === 'window' ? 0 : vs.format === 'portrait' ? 1920 : 1080;
+            studioVideoSettings.framerate = vs.framerate;
+            saveJSON(SETTINGS_KEY, this.settings);
+        };
+        saveVideo();
+        out.push(row('Format', select([
+            { value: 'landscape', label: '1920×1080 (horizontal)' },
+            { value: 'portrait', label: '1080×1920 (vertical, TikTok / Shorts)' },
+            { value: 'window', label: 'Taille de la fenêtre' },
+        ], vs.format, (v) => { vs.format = v as VideoFormat; saveVideo(); })));
+        out.push(row('Images/s', select([{ value: '30', label: '30' }, { value: '60', label: '60' }], String(vs.framerate), (v) => { vs.framerate = Number(v); saveVideo(); })));
+        const lastStep = Math.max(0, ...layer.actors.flatMap((a) => a.state.steps.map((st) => st.time)));
+        if (vs.duration <= 0)
+            vs.duration = Math.ceil(lastStep + 3);
+        out.push(row('Durée (s)', el('div', { className: 'MiiStudioInline' }, [
+            numberInput(vs.duration, 1, (v) => { if (v > 0) { vs.duration = v; saveVideo(); } }),
+            button('Jusqu\'à la fin de la séquence', () => { vs.duration = Math.ceil(lastStep + 2); saveVideo(); this.rebuild(); }),
+        ])));
+        if (this.recorder === null) {
+            out.push(el('div', { className: 'MiiStudioInline' }, [button('🎬 Exporter la vidéo', () => this.exportVideo())]));
+        } else {
+            out.push(el('div', { className: 'MiiStudioInline' }, [this.videoProgressElem, button('Annuler', () => { if (this.recorder !== null) this.recorder.aborted = true; })]));
+        }
+        out.push(el('div', { className: 'MiiStudioHint', textContent: 'La vidéo est filmée depuis la vue actuelle (caméra fixe), Mii compris, en rejouant leur séquence depuis 0. Fichier .mp4 lisible dans Premiere, CapCut… Pour une caméra qui bouge, fais une animation dans le Studio : son bouton d\'enregistrement utilise aussi ce format.' }));
 
         out.push(section('Réglages'));
         out.push(row('Serveur visages', select([
@@ -607,6 +735,38 @@ export class MiiPanel extends Panel {
             button('Lumière par défaut', () => { Object.assign(ls, DEFAULT_LIGHT); applyLight(); this.rebuild(); }),
         ]));
         return out;
+    }
+
+    private videoProgressElem = el('span', { textContent: '' });
+
+    private async exportVideo(): Promise<void> {
+        if (this.viewer === null || this.recorder !== null)
+            return;
+        if (typeof VideoEncoder === 'undefined') {
+            this.setMessage('Ton navigateur ne sait pas encoder de vidéo (essaie Chrome ou Edge).');
+            return;
+        }
+        const viewer = this.viewer;
+        const vs = this.settings.video;
+        this.recorder = new VideoRecorder(viewer, null, {
+            width: studioVideoSettings.width, height: studioVideoSettings.height, framerate: vs.framerate,
+            durationMs: vs.duration * 1000, filenamePrefix: 'Mii',
+            onProgress: (f) => { this.videoProgressElem.textContent = `Enregistrement… ${Math.round(f * 100)} %`; },
+        });
+        this.videoProgressElem.textContent = 'Préparation…';
+        this.setMessage('');
+        this.rebuild();
+        viewer.externalControl = true;
+        try {
+            await this.recorder.render();
+            this.setMessage(this.recorder.aborted ? 'Export annulé.' : 'Vidéo exportée : regarde dans tes téléchargements.');
+        } catch (e) {
+            this.setMessage(`L'export vidéo a échoué (${e}).`);
+        } finally {
+            viewer.externalControl = false;
+            this.recorder = null;
+            this.rebuild();
+        }
     }
 
     private rebuild(): void {

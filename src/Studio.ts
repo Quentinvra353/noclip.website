@@ -9,6 +9,7 @@ import { mat4, ReadonlyMat4, vec3, vec2 } from 'gl-matrix';
 import { GlobalSaveManager } from './SaveManager.js';
 import { getPointHermite } from './Spline.js';
 import { Muxer, ArrayBufferTarget } from 'webm-muxer';
+import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4ArrayBufferTarget } from 'mp4-muxer';
 import { downloadBuffer } from './DownloadUtils.js';
 
 export const CLAPBOARD_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" height="20" fill="white"><path d="M61,22H14.51l3.41-.72h0l7.74-1.64,2-.43h0l6.85-1.46h0l1.17-.25,8.61-1.83h0l.78-.17,9-1.91h0l.4-.08L60,12.33a1,1,0,0,0,.77-1.19L59.3,4.3a1,1,0,0,0-1.19-.77l-19,4-1.56.33h0L28.91,9.74,27.79,10h0l-9.11,1.94-.67.14h0L3.34,15.17a1,1,0,0,0-.77,1.19L4,23.11V60a1,1,0,0,0,1,1H61a1,1,0,0,0,1-1V23A1,1,0,0,0,61,22ZM57,5.8l.65.6.89,4.19-1.45.31L52.6,6.75ZM47.27,7.88,51.8,12,47.36,13,42.82,8.83ZM37.48,10,42,14.11l-4.44.94L33,10.91ZM27.7,12l4.53,4.15-4.44.94L23.26,13Zm-9.78,2.08,4.53,4.15L18,19.21l-4.53-4.15ZM19.49,29H14.94l3.57-5h4.54Zm9-5h4.54l-3.57,5H24.94ZM39,45.88l-11,6A1,1,0,0,1,26.5,51V39A1,1,0,0,1,28,38.12l11,6a1,1,0,0,1,0,1.76ZM39.49,29H34.94l3.57-5h4.54Zm10,0H44.94l3.57-5h4.54ZM60,29H54.94l3.57-5H60Z"/></svg>`;
@@ -2365,7 +2366,7 @@ export class StudioPanel extends FloatingPanel {
 
         this.viewer.externalControl = true;
 
-        this.videoRecorder = new VideoRecorder(this.viewer, this.animationManager);
+        this.videoRecorder = new VideoRecorder(this.viewer, this.animationManager, { ...studioVideoSettings });
         await this.videoRecorder.render();
 
         if (this.videoRecorder !== null && !this.videoRecorder.aborted)
@@ -3898,41 +3899,30 @@ export class StudioPanel extends FloatingPanel {
     }
 }
 
-class VideoRecorder {
-    private encoder: VideoEncoder;
-    private target: ArrayBufferTarget;
-    private muxer: Muxer<ArrayBufferTarget>;
-    private static codec = 'vp09.00.10.08';
-    private framerate = 60;
+export interface VideoRecordingOptions {
+    // Output size in pixels; the window size when left out.
+    width?: number;
+    height?: number;
+    framerate?: number;
+    // Used when there is no camera animation to follow.
+    durationMs?: number;
+    filenamePrefix?: string;
+    onProgress?: (fraction: number) => void;
+}
+
+// Shared with the Mii panel, so the Studio's own recording uses the same output size.
+export const studioVideoSettings: { width: number, height: number, framerate: number } = { width: 0, height: 0, framerate: 60 };
+
+export class VideoRecorder {
+    private static webmCodec = 'vp09.00.10.08';
+    // H.264 High profile, level 4.2: plays everywhere, video editors included.
+    private static mp4Codec = 'avc1.64002A';
     private bitrate = 4e7;
 
     public aborted = false;
     private compositeCanvas: HTMLCanvasElement | null = null;
 
-    constructor(private viewer: Viewer.Viewer, private cameraController: CameraAnimationManager) {
-        const width = viewer.canvas.width;
-        const height = viewer.canvas.height;
-
-        this.target = new ArrayBufferTarget();
-
-        this.muxer = new Muxer({ 
-            target: this.target,
-            video: {
-                codec: 'V_VP9', width, height,
-            },
-        });
-
-        this.encoder = new VideoEncoder({
-            output: (chunk, meta) => { this.muxer.addVideoChunk(chunk, meta); },
-            error: (e) => { console.error(e) },
-        });
-
-        this.encoder.configure({
-            codec: VideoRecorder.codec,
-            width, height,
-            bitrate: this.bitrate,
-            framerate: this.framerate,
-        });
+    constructor(private viewer: Viewer.Viewer, private cameraController: CameraAnimationManager | null, private options: VideoRecordingOptions = {}) {
     }
 
     private getFrameSource(): HTMLCanvasElement {
@@ -3940,13 +3930,14 @@ class VideoRecorder {
         if (overlays.length === 0)
             return this.viewer.canvas;
 
-        if (this.compositeCanvas === null) {
+        if (this.compositeCanvas === null)
             this.compositeCanvas = document.createElement('canvas');
-            this.compositeCanvas.width = this.viewer.canvas.width;
-            this.compositeCanvas.height = this.viewer.canvas.height;
+        const w = this.viewer.canvas.width, h = this.viewer.canvas.height;
+        if (this.compositeCanvas.width !== w || this.compositeCanvas.height !== h) {
+            this.compositeCanvas.width = w;
+            this.compositeCanvas.height = h;
         }
         const ctx = this.compositeCanvas.getContext('2d')!;
-        const w = this.compositeCanvas.width, h = this.compositeCanvas.height;
         ctx.clearRect(0, 0, w, h);
         ctx.drawImage(this.viewer.canvas, 0, 0, w, h);
         for (let i = 0; i < overlays.length; i++)
@@ -3955,12 +3946,59 @@ class VideoRecorder {
     }
 
     public async render() {
+        const canvas = this.viewer.canvas;
+        const savedWidth = canvas.width, savedHeight = canvas.height;
+        // Encoders want even sizes.
+        const width = (this.options.width || canvas.width) & ~1;
+        const height = (this.options.height || canvas.height) & ~1;
+        const framerate = this.options.framerate ?? 60;
+        canvas.width = width;
+        canvas.height = height;
+
+        try {
+            await this.renderFrames(width, height, framerate);
+        } finally {
+            canvas.width = savedWidth;
+            canvas.height = savedHeight;
+            // Let the app size the canvas back to the window.
+            window.dispatchEvent(new Event('resize'));
+        }
+    }
+
+    private async renderFrames(width: number, height: number, framerate: number) {
+        const useMp4 = (await VideoEncoder.isConfigSupported({ codec: VideoRecorder.mp4Codec, width, height })).supported;
+        let finalize: () => ArrayBuffer;
+        let addChunk: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => void;
+        if (useMp4) {
+            const target = new Mp4ArrayBufferTarget();
+            const muxer = new Mp4Muxer({ target, video: { codec: 'avc', width, height }, fastStart: 'in-memory' });
+            addChunk = (chunk, meta) => muxer.addVideoChunk(chunk, meta);
+            finalize = () => { muxer.finalize(); return target.buffer; };
+        } else {
+            const target = new ArrayBufferTarget();
+            const muxer = new Muxer({ target, video: { codec: 'V_VP9', width, height } });
+            addChunk = (chunk, meta) => muxer.addVideoChunk(chunk, meta);
+            finalize = () => { muxer.finalize(); return target.buffer; };
+        }
+
+        const encoder = new VideoEncoder({
+            output: (chunk, meta) => addChunk(chunk, meta),
+            error: (e) => { console.error(e) },
+        });
+        encoder.configure({
+            codec: useMp4 ? VideoRecorder.mp4Codec : VideoRecorder.webmCodec,
+            width, height,
+            bitrate: this.bitrate,
+            framerate,
+        });
+
         for (const overlay of this.viewer.overlays)
             if (overlay.prepareForRecording !== undefined)
                 await overlay.prepareForRecording();
 
-        const mspf = 1000 / this.framerate;
-        const frameCount = Math.ceil(this.cameraController.durationMs / mspf);
+        const mspf = 1000 / framerate;
+        const durationMs = this.cameraController !== null ? this.cameraController.durationMs : (this.options.durationMs ?? 5000);
+        const frameCount = Math.ceil(durationMs / mspf);
 
         // Ideally we'd do this offscreen...
         const updateInfo: Viewer.ViewerUpdateInfo = {
@@ -3975,7 +4013,8 @@ class VideoRecorder {
                 break;
 
             const timeInMilliseconds = (frame * mspf);
-            this.cameraController.setElapsedTime(timeInMilliseconds);
+            if (this.cameraController !== null)
+                this.cameraController.setElapsedTime(timeInMilliseconds);
             this.viewer.update(updateInfo);
             updateInfo.time += mspf;
 
@@ -3987,25 +4026,27 @@ class VideoRecorder {
             if (keyFrame)
                 keyFrameTime = timestamp;
 
-            this.encoder.encode(videoFrame, { keyFrame });
+            encoder.encode(videoFrame, { keyFrame });
             videoFrame.close();
+            this.options.onProgress?.((frame + 1) / frameCount);
 
             // Wait a bit before the next frame.
-            while (this.encoder.encodeQueueSize > 2 && !this.aborted)
+            while (encoder.encodeQueueSize > 2 && !this.aborted)
                 await this.waitPromise(16);
         }
 
         if (this.aborted) {
-            this.encoder.close();
+            encoder.close();
             return;
         }
 
-        await this.encoder.flush();
-        this.muxer.finalize();
+        await encoder.flush();
+        const buffer = finalize();
 
         const sceneDescName = GlobalSaveManager.getCurrentSceneDescId()?.replace('/', '_');
-        const filename = `Studio_${sceneDescName}.webm`;
-        downloadBuffer(filename, this.target.buffer, 'video/webm');
+        const ext = useMp4 ? 'mp4' : 'webm';
+        const filename = `${this.options.filenamePrefix ?? 'Studio'}_${sceneDescName}_${width}x${height}.${ext}`;
+        downloadBuffer(filename, buffer, useMp4 ? 'video/mp4' : 'video/webm');
     }
 
     private waitPromise(ms: number): Promise<void> {
@@ -4020,7 +4061,7 @@ class VideoRecorder {
 
         // hopefully 1024x1024 is enough for our purposes
         const ret = await VideoEncoder.isConfigSupported({
-            codec: this.codec,
+            codec: this.webmCodec,
             width: 1024, height: 1024,
         });
         return !!ret.supported;
