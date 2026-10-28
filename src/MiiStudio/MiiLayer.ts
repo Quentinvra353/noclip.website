@@ -236,7 +236,15 @@ export class MiiActor {
         if (this.head !== null)
             this.root.remove(this.head);
         this.head = head;
-        head.traverse((o) => { o.frustumCulled = false; });
+        head.traverse((o) => {
+            o.frustumCulled = false;
+            const mat = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+            // glTF defaults to fully metallic, which renders black without an environment map.
+            if (mat !== undefined && mat.isMeshStandardMaterial) {
+                mat.metalness = 0;
+                mat.roughness = 1;
+            }
+        });
         this.root.add(head);
     }
 
