@@ -58,13 +58,58 @@ export const EXPRESSIONS: { id: string, name: string }[] = [
     { id: '69', name: 'Sidéré' },
 ];
 
-export function animationDisplayName(clip: string): string {
-    if (clip === 'Wait') return 'Attente';
-    if (clip === 'Finish') return 'Victoire';
+// What each Miitomo body clip looks like, so poses can be picked without trying them all.
+const MIITOMO_POSE_NAMES: Record<string, string> = {
+    'Wait': 'Attente (debout)',
+    'Finish': 'Salut de la main',
+    'Pose.01': 'Debout, bras le long du corps',
+    'Pose.02': 'Bras écartés',
+    'Pose.03': 'Main sur le cœur',
+    'Pose.04': 'Coucou (main levée)',
+    'Pose.05': 'Bras croisés',
+    'Pose.06': 'Un bras levé au ciel',
+    'Pose.07': 'Montre du doigt, main sur la hanche',
+    'Pose.08': 'Deux bras en l\'air',
+    'Pose.09': 'Montre ses muscles',
+    'Pose.10': 'Mains devant la bouche',
+    'Pose.11': 'Genou levé (course)',
+    'Pose.12': 'Mains sur les hanches, se penche',
+    'Pose.13': 'Coup de poing',
+    'Pose.14': 'Main au menton (réfléchit)',
+    'Pose.15': 'Bras en croix sur une jambe',
+    'Pose.16': 'Dos voûté (fatigué)',
+};
+
+export function animationDisplayName(clip: string, bodyModel: BodyModel = 'miitomo'): string {
+    const desc = bodyModel === 'miitomo' ? MIITOMO_POSE_NAMES[clip] : undefined;
+    if (clip === 'Wait') return desc ?? 'Attente';
+    if (clip === 'Finish') return desc ?? 'Victoire';
     const m = clip.match(/^Pose\.(\d+)$/);
-    if (m !== null) return `Pose ${parseInt(m[1], 10)}`;
+    if (m !== null) return desc !== undefined ? `Pose ${parseInt(m[1], 10)} · ${desc}` : `Pose ${parseInt(m[1], 10)}`;
     return clip;
 }
+
+export function animationSortKey(clip: string): number {
+    if (clip === 'Wait') return -2;
+    if (clip === 'Finish') return -1;
+    const m = clip.match(/^Pose\.(\d+)$/);
+    return m !== null ? parseInt(m[1], 10) : 1000;
+}
+
+export interface LightSettings {
+    // Directional light, in degrees: azimuth around the vertical axis, elevation above the horizon.
+    intensity: number;
+    azimuth: number;
+    elevation: number;
+    color: string;
+    ambient: number;
+    shadow: boolean;
+    shadowOpacity: number;
+}
+
+export const DEFAULT_LIGHT: LightSettings = {
+    intensity: 1.6, azimuth: 30, elevation: 60, color: '#ffffff', ambient: 1.6, shadow: true, shadowOpacity: 0.45,
+};
 
 export interface MiiStep {
     time: number;
@@ -107,6 +152,8 @@ export class MiiActor {
     public clips = new Map<string, THREE.AnimationClip>();
     public head: THREE.Object3D | null = null;
     public placeholderHead: THREE.Mesh;
+    // Catches the Mii's shadow on the ground under its feet; only the shadow itself is drawn.
+    public shadowPlane: THREE.Mesh<THREE.PlaneGeometry, THREE.ShadowMaterial>;
     public headError: string | null = null;
     public currentAnimation: string | null = null;
     public currentExpression: string | null = null;
@@ -126,6 +173,11 @@ export class MiiActor {
         this.placeholderHead = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshLambertMaterial({ color: 0xF0C8A0 }));
         this.placeholderHead.visible = false;
         this.root.add(this.placeholderHead);
+        this.shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.ShadowMaterial({ opacity: DEFAULT_LIGHT.shadowOpacity, depthWrite: false }));
+        this.shadowPlane.rotation.x = -Math.PI / 2;
+        this.shadowPlane.receiveShadow = true;
+        this.shadowPlane.frustumCulled = false;
+        this.root.add(this.shadowPlane);
     }
 
     public isImported(): boolean {
@@ -204,6 +256,7 @@ export class MiiActor {
 
         this.headBone = null;
         this.placeholderHead.visible = false;
+        this.body.traverse((o) => { o.castShadow = true; });
         this.bodyGroup.add(this.body);
         this.mixer = new THREE.AnimationMixer(this.body);
         this.currentAction = null;
@@ -266,6 +319,7 @@ export class MiiActor {
         });
 
         this.headBone = this.body.getObjectByName('head') ?? this.body.getObjectByName('Head') ?? null;
+        this.body.traverse((o) => { o.castShadow = true; });
         this.bodyGroup.add(this.body);
 
         this.mixer = new THREE.AnimationMixer(this.body);
@@ -285,6 +339,9 @@ export class MiiActor {
         this.root.rotation.set(0, s.yaw * Math.PI / 180, 0);
         const scale = s.size / this.bodyHeight;
         this.root.scale.setScalar(scale);
+        // Big enough for long shadows from a low light.
+        this.shadowPlane.scale.setScalar(this.bodyHeight * 6);
+        this.shadowPlane.position.y = this.bodyHeight * 0.002;
         if (this.isImported()) {
             this.bodyGroup.scale.setScalar(1);
         } else {
@@ -364,6 +421,7 @@ export class MiiActor {
         this.head = head;
         head.traverse((o) => {
             o.frustumCulled = false;
+            o.castShadow = true;
             const mat = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
             // glTF defaults to fully metallic, which renders black without an environment map.
             if (mat !== undefined && mat.isMeshStandardMaterial) {
@@ -432,6 +490,9 @@ export class MiiLayer implements ViewerOverlay {
     private camera = new THREE.PerspectiveCamera();
     private hemiLight = new THREE.HemisphereLight(0xFFFFFF, 0x808080, 1.6);
     private dirLight = new THREE.DirectionalLight(0xFFFFFF, 1.6);
+    private light: LightSettings = { ...DEFAULT_LIGHT };
+    private lightDir = new THREE.Vector3();
+    private tmpCenter = new THREE.Vector3();
     private loader = new GLTFLoader();
     private bodyTemplates = new Map<string, Promise<BodyTemplate>>();
     private headCache = new Map<string, THREE.Object3D>();
@@ -453,8 +514,11 @@ export class MiiLayer implements ViewerOverlay {
         this.renderer.setClearColor(0x000000, 0);
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-        this.dirLight.position.set(0.4, 1, 0.6);
-        this.scene.add(this.hemiLight, this.dirLight);
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.dirLight.shadow.mapSize.set(2048, 2048);
+        this.scene.add(this.hemiLight, this.dirLight, this.dirLight.target);
+        this.setLight(this.light);
 
         this.camera.matrixAutoUpdate = false;
         this.camera.matrixWorldAutoUpdate = false;
@@ -463,9 +527,40 @@ export class MiiLayer implements ViewerOverlay {
         viewer.overlays.push(this);
     }
 
-    public setLightIntensity(v: number): void {
-        this.hemiLight.intensity = v;
-        this.dirLight.intensity = v;
+    public setLight(light: LightSettings): void {
+        this.light = { ...light };
+        this.hemiLight.intensity = light.ambient;
+        this.dirLight.intensity = light.intensity;
+        this.dirLight.color.set(light.color);
+        this.dirLight.castShadow = light.shadow;
+        const az = light.azimuth * Math.PI / 180, el = light.elevation * Math.PI / 180;
+        this.lightDir.set(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
+    }
+
+    // Fit the light and its shadow camera around the visible Miis.
+    private updateLight(): void {
+        const box = new THREE.Box3();
+        let maxSize = 0;
+        for (const actor of this.actors) {
+            actor.shadowPlane.visible = this.light.shadow;
+            actor.shadowPlane.material.opacity = this.light.shadowOpacity;
+            if (!actor.state.visible)
+                continue;
+            box.expandByPoint(this.tmpCenter.fromArray(actor.state.position));
+            maxSize = Math.max(maxSize, actor.state.size);
+        }
+        if (box.isEmpty())
+            return;
+        box.getCenter(this.tmpCenter);
+        const radius = box.max.distanceTo(box.min) / 2 + maxSize * 3;
+        this.dirLight.target.position.copy(this.tmpCenter);
+        this.dirLight.position.copy(this.tmpCenter).addScaledVector(this.lightDir, radius * 2);
+        const cam = this.dirLight.shadow.camera;
+        cam.left = -radius; cam.right = radius; cam.top = radius; cam.bottom = -radius;
+        cam.near = radius * 0.5; cam.far = radius * 4;
+        cam.updateProjectionMatrix();
+        this.dirLight.shadow.bias = -0.0005;
+        this.dirLight.shadow.normalBias = maxSize * 0.005;
     }
 
     public measureHeight(obj: THREE.Object3D): number {
@@ -614,6 +709,7 @@ export class MiiLayer implements ViewerOverlay {
 
         for (const actor of this.actors)
             actor.update(dt, this.clock);
+        this.updateLight();
 
         const cam = viewerInput.camera;
         let minSize = Infinity;
