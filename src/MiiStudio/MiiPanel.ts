@@ -239,7 +239,7 @@ export class MiiPanel extends Panel {
 
         const nameInput = el('input', { type: 'text', placeholder: 'Nom du Mii' });
         const dataInput = el('textarea', { placeholder: 'Colle ici les données du Mii (copiées depuis Mi Creator)' });
-        const fileInput = el('input', { type: 'file', accept: '.mii,.charinfo,.ffsd,.cfsd,.bin,.rcd,.3dsmii,.txt' });
+        const fileInput = el('input', { type: 'file', accept: '.miic,.mii,.charinfo,.ffsd,.cfsd,.bin,.rcd,.3dsmii,.txt' });
         fileInput.onchange = async () => {
             const f = fileInput.files?.[0];
             if (f === undefined)
