@@ -204,7 +204,7 @@ export class MiiPanel extends Panel {
         const size = this.selected?.state.size ?? 100;
         const { position, yaw } = this.cameraPlacement(size);
         const state: MiiActorState = {
-            name: entry.name, data: info.rendererData,
+            name: entry.name, data: info.rendererData, miic: info.miic,
             gender: info.gender, favoriteColor: info.favoriteColor,
             height: info.height, build: info.build,
             bodyModel: 'miitomo', position, yaw, size, visible: true,
@@ -227,9 +227,9 @@ export class MiiPanel extends Panel {
             const label = name.trim() || `Mii ${this.library.length + 1}`;
             this.library.push({ name: label, data: data.trim() });
             saveJSON(LIBRARY_KEY, this.library);
-            this.setMessage(`« ${label} » ajouté (format ${info.format}, ${info.gender === MiiGender.Female ? 'fille' : 'garçon'}, ${FAVORITE_COLOR_NAMES[info.favoriteColor].toLowerCase()}).`);
+            this.setMessage(`« ${label} » ajouté (format ${info.format}${info.miic !== undefined ? ' + couleurs Mi Creator' : ''}, ${info.gender === MiiGender.Female ? 'fille' : 'garçon'}, ${FAVORITE_COLOR_NAMES[info.favoriteColor].toLowerCase()}).`);
         } catch (e) {
-            this.setMessage(`${e} Colle les données copiées depuis Mi Creator (code hexadécimal ou base64), ou choisis un fichier .mii / .charinfo / .ffsd.`);
+            this.setMessage(`${e} Colle les données copiées depuis Mi Creator (code hexadécimal ou base64), ou choisis les fichiers .charinfo et .miic du Mii.`);
         }
         this.rebuild();
     }
@@ -238,16 +238,21 @@ export class MiiPanel extends Panel {
         const out: HTMLElement[] = [section('Mes Mii')];
 
         const nameInput = el('input', { type: 'text', placeholder: 'Nom du Mii' });
-        const dataInput = el('textarea', { placeholder: 'Colle ici les données du Mii (copiées depuis Mi Creator)' });
+        const dataInput = el('textarea', { placeholder: 'Colle ici les « Données CharInfo/Switch (Hex) » de Mi Creator, puis sur une 2e ligne les « Données Mii Creator (Base64) »' });
         const fileInput = el('input', { type: 'file', accept: '.miic,.mii,.charinfo,.ffsd,.cfsd,.bin,.rcd,.3dsmii,.txt' });
+        fileInput.multiple = true;
         fileInput.onchange = async () => {
-            const f = fileInput.files?.[0];
-            if (f === undefined)
+            const files = Array.from(fileInput.files ?? []);
+            if (files.length === 0)
                 return;
-            const buf = new Uint8Array(await f.arrayBuffer());
-            const text = new TextDecoder().decode(buf).trim();
-            const data = /^[0-9a-fA-F\s]+$/.test(text) ? text : Array.from(buf, (v) => v.toString(16).padStart(2, '0')).join('');
-            this.addToLibrary(nameInput.value || f.name.replace(/\.[^.]+$/, ''), data);
+            const parts: string[] = [];
+            for (const f of files) {
+                const buf = new Uint8Array(await f.arrayBuffer());
+                const text = new TextDecoder().decode(buf).trim();
+                parts.push(/^[0-9a-fA-F\s]+$/.test(text) ? text.replace(/\s/g, '') : Array.from(buf, (v) => v.toString(16).padStart(2, '0')).join(''));
+            }
+            this.addToLibrary(nameInput.value || files[0].name.replace(/\.[^.]+$/, ''), parts.join('\n'));
+            fileInput.value = '';
         };
         out.push(nameInput, dataInput, el('div', { className: 'MiiStudioInline' }, [
             button('Ajouter', () => this.addToLibrary(nameInput.value, dataInput.value)),
