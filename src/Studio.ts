@@ -3904,6 +3904,8 @@ export interface VideoRecordingOptions {
     width?: number;
     height?: number;
     framerate?: number;
+    // Renders this many times bigger, then scales down: sharper edges and textures.
+    supersample?: number;
     // Used when there is no camera animation to follow.
     durationMs?: number;
     filenamePrefix?: string;
@@ -3911,13 +3913,13 @@ export interface VideoRecordingOptions {
 }
 
 // Shared with the Mii panel, so the Studio's own recording uses the same output size.
-export const studioVideoSettings: { width: number, height: number, framerate: number } = { width: 0, height: 0, framerate: 60 };
+export const studioVideoSettings: { width: number, height: number, framerate: number, supersample: number } = { width: 0, height: 0, framerate: 60, supersample: 1 };
 
 export class VideoRecorder {
     private static webmCodec = 'vp09.00.10.08';
-    // H.264 High profile, level 4.2: plays everywhere, video editors included.
-    private static mp4Codec = 'avc1.64002A';
-    private bitrate = 4e7;
+    // H.264 High profile: plays everywhere, video editors included. Level 5.1 allows high bitrates;
+    // 4.2 is the fallback for encoders that don't take it.
+    private static mp4Codecs = ['avc1.640033', 'avc1.64002A'];
 
     public aborted = false;
     private compositeCanvas: HTMLCanvasElement | null = null;
@@ -3925,19 +3927,20 @@ export class VideoRecorder {
     constructor(private viewer: Viewer.Viewer, private cameraController: CameraAnimationManager | null, private options: VideoRecordingOptions = {}) {
     }
 
-    private getFrameSource(): HTMLCanvasElement {
+    private getFrameSource(w: number, h: number): HTMLCanvasElement {
         const overlays = this.viewer.overlays;
-        if (overlays.length === 0)
+        if (overlays.length === 0 && this.viewer.canvas.width === w && this.viewer.canvas.height === h)
             return this.viewer.canvas;
 
         if (this.compositeCanvas === null)
             this.compositeCanvas = document.createElement('canvas');
-        const w = this.viewer.canvas.width, h = this.viewer.canvas.height;
         if (this.compositeCanvas.width !== w || this.compositeCanvas.height !== h) {
             this.compositeCanvas.width = w;
             this.compositeCanvas.height = h;
         }
         const ctx = this.compositeCanvas.getContext('2d')!;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         ctx.clearRect(0, 0, w, h);
         ctx.drawImage(this.viewer.canvas, 0, 0, w, h);
         for (let i = 0; i < overlays.length; i++)
@@ -3952,8 +3955,9 @@ export class VideoRecorder {
         const width = (this.options.width || canvas.width) & ~1;
         const height = (this.options.height || canvas.height) & ~1;
         const framerate = this.options.framerate ?? 60;
-        canvas.width = width;
-        canvas.height = height;
+        const supersample = Math.max(1, Math.min(this.options.supersample ?? 1, 3));
+        canvas.width = width * supersample;
+        canvas.height = height * supersample;
 
         try {
             await this.renderFrames(width, height, framerate);
@@ -3966,7 +3970,20 @@ export class VideoRecorder {
     }
 
     private async renderFrames(width: number, height: number, framerate: number) {
-        const useMp4 = (await VideoEncoder.isConfigSupported({ codec: VideoRecorder.mp4Codec, width, height })).supported;
+        // About 0.6 bits per pixel: well above what's needed for crisp 1080p, even with lots of motion.
+        const bitrate = Math.min(Math.round(width * height * framerate * 0.6), 1.2e8);
+        const configFor = (codec: string): VideoEncoderConfig => ({
+            codec, width, height, bitrate, framerate,
+            bitrateMode: 'variable', latencyMode: 'quality',
+        });
+        let mp4Codec: string | null = null;
+        for (const codec of VideoRecorder.mp4Codecs) {
+            if ((await VideoEncoder.isConfigSupported(configFor(codec))).supported) {
+                mp4Codec = codec;
+                break;
+            }
+        }
+        const useMp4 = mp4Codec !== null;
         let finalize: () => ArrayBuffer;
         let addChunk: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => void;
         if (useMp4) {
@@ -3985,12 +4002,7 @@ export class VideoRecorder {
             output: (chunk, meta) => addChunk(chunk, meta),
             error: (e) => { console.error(e) },
         });
-        encoder.configure({
-            codec: useMp4 ? VideoRecorder.mp4Codec : VideoRecorder.webmCodec,
-            width, height,
-            bitrate: this.bitrate,
-            framerate,
-        });
+        encoder.configure(configFor(mp4Codec ?? VideoRecorder.webmCodec));
 
         for (const overlay of this.viewer.overlays)
             if (overlay.prepareForRecording !== undefined)
@@ -4018,11 +4030,11 @@ export class VideoRecorder {
             this.viewer.update(updateInfo);
             updateInfo.time += mspf;
 
-            const videoFrame = new VideoFrame(this.getFrameSource(), { timestamp });
+            const videoFrame = new VideoFrame(this.getFrameSource(width, height), { timestamp });
             timestamp += mspf * 1000; // microseconds
 
-            // Force a keyframe every second
-            const keyFrame = keyFrameTime < 0 || (timestamp - keyFrameTime) >= 1000000;
+            // Force a keyframe every two seconds
+            const keyFrame = keyFrameTime < 0 || (timestamp - keyFrameTime) >= 2000000;
             if (keyFrame)
                 keyFrameTime = timestamp;
 
