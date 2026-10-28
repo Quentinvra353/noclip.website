@@ -627,8 +627,25 @@ export class MiiLayer implements ViewerOverlay {
         return [v[0], v[1], v[2]];
     }
 
+    // Next click on the scenery goes to this callback instead of moving the camera.
+    public pendingPick: ((point: [number, number, number] | null) => void) | null = null;
+
     private onMouseDown = (e: MouseEvent): void => {
-        if (!this.moveMode || e.button !== 0 || e.target !== this.viewer.canvas)
+        if (e.button !== 0 || e.target !== this.viewer.canvas)
+            return;
+        if (this.pendingPick !== null) {
+            const ndc = this.mouseNDC(e);
+            if (ndc === null)
+                return;
+            e.stopPropagation();
+            e.preventDefault();
+            const cb = this.pendingPick;
+            this.pendingPick = null;
+            this.viewer.canvas.style.cursor = '';
+            cb(this.pickScenery(ndc.x, ndc.y));
+            return;
+        }
+        if (!this.moveMode)
             return;
         const ndc = this.mouseNDC(e);
         if (ndc === null)
