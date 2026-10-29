@@ -3,9 +3,9 @@ import { Panel, COOL_BLUE_COLOR } from '../ui.js';
 import type { Viewer } from '../viewer.js';
 import { GlobalSaveManager } from '../SaveManager.js';
 import { FAVORITE_COLOR_NAMES, MiiGender, parseMiiData } from './MiiData.js';
-import { saveModel } from './MiiStore.js';
+import { deleteModel, saveModel } from './MiiStore.js';
 import { studioVideoSettings, VideoRecorder } from '../Studio.js';
-import { ALT_RENDERER_URL, animationDisplayName, animationSortKey, BodyModel, DEFAULT_LIGHT, DEFAULT_RENDERER_URL, EXPRESSIONS, LightSettings, MiiActor, MiiActorState, MiiLayer } from './MiiLayer.js';
+import { ALT_RENDERER_URL, animationDisplayName, animationSortKey, BodyModel, DEFAULT_LIGHT, DEFAULT_RENDERER_URL, EXPRESSIONS, IMAGE_FACE_PREFIX, LightSettings, MiiActor, MiiActorState, MiiLayer } from './MiiLayer.js';
 
 const MII_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" height="20" fill="white"><circle cx="12" cy="7" r="5"/><path d="M4 23c0-5 3.6-8.5 8-8.5s8 3.5 8 8.5z"/></svg>`;
 
@@ -37,6 +37,72 @@ function expressionName(id: string, imported: boolean): string {
     if (imported && id === 'normal')
         return 'Visage de l\'export';
     return EXPRESSIONS.find((e) => e.id === id)?.name ?? id;
+}
+
+// What the Mi Creator bookmarklet downloads: every expression face of one Mii, as PNG data URLs.
+interface EmotionBundle {
+    type: 'mii-studio-emotions';
+    version: number;
+    name?: string;
+    faces: Record<string, string>;
+}
+
+function bookmarkletCode(): string {
+    const base = window.location.origin + window.location.pathname.replace(/[^/]*$/, '');
+    const url = new URL('mii/emotions.js', base).href;
+    return `javascript:(()=>{const s=document.createElement('script');s.src='${url}?t='+Date.now();document.body.appendChild(s);})()`;
+}
+
+async function dataURLToBytes(url: string): Promise<ArrayBuffer> {
+    return (await fetch(url)).arrayBuffer();
+}
+
+async function decodeImage(bytes: ArrayBuffer): Promise<ImageBitmap> {
+    return createImageBitmap(new Blob([bytes], { type: 'image/png' }), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+}
+
+function smallPixels(img: CanvasImageSource, flip: boolean): Uint8ClampedArray {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const ctx = c.getContext('2d')!;
+    if (flip) {
+        ctx.translate(0, 64);
+        ctx.scale(1, -1);
+    }
+    ctx.drawImage(img, 0, 0, 64, 64);
+    return ctx.getImageData(0, 0, 64, 64).data;
+}
+
+function pixelDistance(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+    let d = 0;
+    for (let i = 0; i < a.length; i++)
+        d += Math.abs(a[i] - b[i]);
+    return d;
+}
+
+// Whether the bundle's faces are upside down compared to the export's own face.
+async function bundleNeedsFlip(bundle: EmotionBundle, base: CanvasImageSource | null): Promise<boolean> {
+    const neutral = bundle.faces['0'];
+    if (base === null || neutral === undefined)
+        return false;
+    const img = await decodeImage(await dataURLToBytes(neutral));
+    const ref = smallPixels(base, false);
+    return pixelDistance(smallPixels(img, true), ref) < pixelDistance(smallPixels(img, false), ref);
+}
+
+async function flipPNG(bytes: ArrayBuffer): Promise<ArrayBuffer> {
+    const img = await decodeImage(bytes);
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext('2d')!;
+    ctx.translate(0, img.height);
+    ctx.scale(1, -1);
+    ctx.drawImage(img, 0, 0);
+    const blob = await new Promise<Blob | null>((r) => c.toBlob(r, 'image/png'));
+    if (blob === null)
+        throw new Error('image illisible');
+    return blob.arrayBuffer();
 }
 
 function loadJSON<T>(key: string, fallback: T): T {
@@ -143,7 +209,8 @@ export class MiiPanel extends Panel {
                 .MiiStudioItem > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
                 .MiiStudioItem.selected > span { color: rgb(255, 120, 120); }
                 .MiiStudioMessage { color: #ffb070; white-space: pre-wrap; }
-                .MiiStudioHint { color: #aaa; font-size: 12px; line-height: 1.4; }
+                .MiiStudioHint { color: #aaa; font-size: 12px; line-height: 1.4; white-space: pre-line; }
+                .MiiStudioBookmarklet { display: inline-block; padding: 4px 10px; border-radius: 6px; background: #5b3aa0; color: white; text-decoration: none; font-weight: bold; cursor: grab; }
             </style>
         `);
 
@@ -352,17 +419,103 @@ export class MiiPanel extends Panel {
         this.rebuild();
     }
 
+    // Adds every face from a Mi Creator bookmarklet download to the Mii that uses this model.
+    private async importEmotions(actor: MiiActor, file: File): Promise<void> {
+        const model = actor.state.model!;
+        let bundle: EmotionBundle;
+        try {
+            bundle = JSON.parse(await file.text());
+        } catch (e) {
+            this.setMessage('Ce fichier n\'est pas un fichier d\'émotions (.miiemo) de Mi Creator.');
+            return;
+        }
+        if (bundle.type !== 'mii-studio-emotions' || typeof bundle.faces !== 'object') {
+            this.setMessage('Ce fichier n\'est pas un fichier d\'émotions (.miiemo) de Mi Creator.');
+            return;
+        }
+        this.setMessage('Import des émotions…');
+        try {
+            const flip = await bundleNeedsFlip(bundle, actor.getBaseMaskImage());
+            const added: Record<string, string> = {};
+            for (const [num, url] of Object.entries(bundle.faces)) {
+                const expr = EXPRESSIONS.find((e) => String(e.num) === num);
+                // The neutral face is already the export's own.
+                if (expr === undefined || expr.id === 'normal')
+                    continue;
+                let bytes = await dataURLToBytes(url);
+                if (flip)
+                    bytes = await flipPNG(bytes);
+                added[expr.id] = IMAGE_FACE_PREFIX + await saveModel(bytes);
+            }
+
+            const replaced = new Set<string>();
+            for (const entry of this.library) {
+                if (entry.model !== model)
+                    continue;
+                for (const [expr, id] of Object.entries(entry.faces ?? {}))
+                    if (added[expr] !== undefined)
+                        replaced.add(id);
+                entry.faces = { ...entry.faces, ...added };
+            }
+            for (const a of this.layer!.actors) {
+                if (a.state.model !== model)
+                    continue;
+                for (const [expr, id] of Object.entries(a.state.faces ?? {}))
+                    if (added[expr] !== undefined)
+                        replaced.add(id);
+                a.state.faces = { ...a.state.faces, ...added };
+                a.invalidateHead();
+            }
+            saveJSON(LIBRARY_KEY, this.library);
+            for (const id of replaced)
+                deleteModel(id.startsWith(IMAGE_FACE_PREFIX) ? id.slice(IMAGE_FACE_PREFIX.length) : id).catch(() => {});
+            this.pendingFace = null;
+            this.changed();
+            this.setMessage(`${Object.keys(added).length + 1} émotions disponibles pour « ${actor.state.name} ».`);
+        } catch (e) {
+            this.setMessage(`Impossible d'importer les émotions (${e}).`);
+        }
+        this.rebuild();
+    }
+
+    private buildEmotionImport(actor: MiiActor): HTMLElement[] {
+        if (!actor.isImported())
+            return [];
+        const input = el('input', { type: 'file', accept: '.miiemo,.json' });
+        input.style.display = 'none';
+        input.onchange = async () => {
+            const f = input.files?.[0];
+            input.value = '';
+            if (f !== undefined)
+                await this.importEmotions(actor, f);
+        };
+        const count = Object.keys(actor.state.faces ?? {}).length + 1;
+        return [el('div', { className: 'MiiStudioInline' }, [
+            button(`📥 Importer toutes les émotions (${count}/${EXPRESSIONS.length})`, () => input.click(), 'Choisis le fichier .miiemo téléchargé avec le favori « Émotions Mii » sur Mi Creator'),
+            input,
+        ])];
+    }
+
     private buildPendingFace(actor: MiiActor): HTMLElement[] {
         const pending = this.pendingFace;
         if (pending === null || pending.actor !== actor)
             return [];
         const name = expressionName(pending.expression, true);
-        const faceInput = el('input', { type: 'file', accept: '.glb' });
+        const faceInput = el('input', { type: 'file', accept: '.glb,.miiemo,.json' });
         faceInput.style.display = 'none';
         faceInput.onchange = async () => {
             const f = faceInput.files?.[0];
             if (f === undefined)
                 return;
+            if (!/\.glb$/i.test(f.name)) {
+                await this.importEmotions(actor, f);
+                if (actor.state.faces?.[pending.expression] !== undefined) {
+                    pending.apply(pending.expression);
+                    actor.applyStepAt(this.layer!.clock);
+                    this.changed();
+                }
+                return;
+            }
             if (await this.addFace(actor.state.model!, actor.state.name, pending.expression, f)) {
                 this.pendingFace = null;
                 pending.apply(pending.expression);
@@ -372,9 +525,9 @@ export class MiiPanel extends Panel {
             this.rebuild();
         };
         const hint = el('div', { className: 'MiiStudioHint', textContent:
-            `Il manque le visage « ${name} ». Dans Mi Creator, donne cette émotion à ton Mii, refais « Créer un modèle 3D » avec les mêmes réglages, puis choisis le fichier ici. Une seule fois par émotion : ensuite elle reste enregistrée.` });
+            `Il manque le visage « ${name} ». Le plus simple : récupère toutes les émotions d'un coup avec le favori « Émotions Mii » (voir « Mes Mii »), puis choisis le fichier .miiemo ici. Tu peux aussi choisir un export 3D (.glb) fait avec cette émotion.` });
         return [hint, el('div', { className: 'MiiStudioInline' }, [
-            button(`Choisir le .glb « ${name} »`, () => faceInput.click()),
+            button('Choisir le fichier', () => faceInput.click()),
             button('Annuler', () => { this.pendingFace = null; this.rebuild(); }),
             faceInput,
         ])];
@@ -409,6 +562,25 @@ export class MiiPanel extends Panel {
         out.push(nameInput, dataInput, el('div', { className: 'MiiStudioInline' }, [
             button('Ajouter', () => this.addToLibrary(nameInput.value, dataInput.value)),
             fileInput,
+        ]));
+
+        // A bookmark that runs on Mi Creator and downloads every expression face of a Mii at once.
+        const bookmarklet = el('a', { href: bookmarkletCode(), textContent: '⭐ Émotions Mii', className: 'MiiStudioBookmarklet',
+            title: 'Fais glisser ce bouton dans ta barre de favoris' });
+        bookmarklet.onclick = (e) => {
+            e.preventDefault();
+            this.setMessage('Ne clique pas ici : fais glisser « ⭐ Émotions Mii » dans ta barre de favoris, puis utilise-le sur Mi Creator.');
+        };
+        out.push(el('details', {}, [
+            el('summary', { textContent: 'Récupérer toutes les émotions d\'un Mii d\'un coup' }),
+            el('div', { className: 'MiiStudioHint', textContent:
+                '1. Fais glisser ce bouton dans ta barre de favoris (Ctrl+Maj+B pour l\'afficher) :' }),
+            el('div', { className: 'MiiStudioInline' }, [bookmarklet]),
+            el('div', { className: 'MiiStudioHint', textContent:
+                '2. Sur Mi Creator (https://mii.nxw.pw/app), clique sur le favori une fois.\n' +
+                '3. Clique sur ton Mii → « Rendu » → « Rendu personnalisé ».\n' +
+                '4. Quand le Mii s\'affiche, reclique sur le favori : il télécharge un fichier .miiemo avec toutes les émotions (quelques secondes).\n' +
+                '5. Ici, place le Mii (son export 3D .glb), puis « 📥 Importer toutes les émotions » et choisis ce fichier.' }),
         ]));
 
         this.library.forEach((entry, i) => {
@@ -505,6 +677,7 @@ export class MiiPanel extends Panel {
         out.push(row('Animation', select(animOptions, base.animation, (v) => { base.animation = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
         out.push(row('Émotion', select(exprOptions, base.expression, (v) => this.pickExpression(actor, v, (e) => { base.expression = e; }))));
         out.push(...this.buildPendingFace(actor));
+        out.push(...this.buildEmotionImport(actor));
 
         const reload = async () => {
             this.changed();
@@ -742,7 +915,7 @@ export class MiiPanel extends Panel {
         shadow.onchange = () => { ls.shadow = shadow.checked; applyLight(); };
         out.push(row('Ombre au sol', el('label', { className: 'MiiStudioInline' }, [shadow, 'Projeter l\'ombre'])));
         out.push(slider('Opacité', 'shadowOpacity', 0, 1, 0.05, (v) => `${Math.round(v * 100)} %`));
-        out.push(el('div', { className: 'MiiStudioHint', textContent: 'Direction : tourne la lumière autour des Mii. Hauteur : 90° = soleil juste au-dessus. L\'ombre est posée sur un sol plat sous les pieds du Mii.' }));
+        out.push(el('div', { className: 'MiiStudioHint', textContent: 'Direction : tourne la lumière autour des Mii. Hauteur : 90° = soleil juste au-dessus. L\'ombre se dessine sur le décor lui-même (pentes, marches, murs). En WebGPU, elle reste sur un sol plat.' }));
         out.push(el('div', { className: 'MiiStudioInline' }, [
             button('Lumière par défaut', () => { Object.assign(ls, DEFAULT_LIGHT); applyLight(); this.rebuild(); }),
         ]));
