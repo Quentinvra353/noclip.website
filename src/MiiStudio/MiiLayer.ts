@@ -283,6 +283,8 @@ export interface MiiActorState {
     // A full-body model exported from Mi Creator, and one export per extra expression (only its face is used).
     model?: string;
     faces?: Record<string, string>;
+    // Name of the group this Mii or object moves with, if any.
+    group?: string;
 }
 
 interface BodyTemplate {
@@ -323,6 +325,9 @@ export class MiiActor {
         this.root.add(this.placeholderHead);
     }
 
+    // An imported .glb that is not a Mi Creator export (a door, a kart…): shown as is, with its own animations.
+    public isObject = false;
+
     public isImported(): boolean {
         return this.state.model !== undefined;
     }
@@ -349,6 +354,9 @@ export class MiiActor {
         this.body = SkeletonUtils.clone(gltf.scene);
         this.bodyHeight = this.layer.measureHeight(gltf.scene);
         this.clips.clear();
+        this.isObject = gltf.scene.getObjectByName('Mask') === undefined;
+        if (this.isObject)
+            return this.finishObject(gltf);
         // The exported skeleton has different units and proportions than the animated template,
         // so translation keys are rescaled per bone and scale keys are dropped.
         const ratios = new Map<string, number>();
@@ -402,6 +410,30 @@ export class MiiActor {
         this.body.traverse((o) => { o.castShadow = castsShadow(o); });
         this.bodyGroup.add(this.body);
         this.mixer = new THREE.AnimationMixer(this.body);
+        this.currentAction = null;
+        this.currentAnimation = null;
+        this.currentExpression = null;
+        this.syncTransform();
+        this.applyStepAt(this.layer.clock, true);
+    }
+
+    private finishObject(gltf: GLTF): void {
+        for (const clip of gltf.animations)
+            this.clips.set(clip.name, clip);
+        this.maskMaterial = null;
+        this.baseMask = null;
+        this.body!.traverse((o) => {
+            const mesh = o as THREE.Mesh;
+            if (!mesh.isMesh)
+                return;
+            mesh.frustumCulled = false;
+            mesh.material = Array.isArray(mesh.material) ? mesh.material.map((m) => m.clone()) : mesh.material.clone();
+            mesh.castShadow = castsShadow(mesh);
+        });
+        this.headBone = null;
+        this.placeholderHead.visible = false;
+        this.bodyGroup.add(this.body!);
+        this.mixer = new THREE.AnimationMixer(this.body!);
         this.currentAction = null;
         this.currentAnimation = null;
         this.currentExpression = null;
@@ -530,8 +562,13 @@ export class MiiActor {
         if (this.mixer === null || this.currentAnimation === name)
             return;
         const clip = this.clips.get(name) ?? this.clips.get('Wait');
-        if (clip === undefined)
+        if (clip === undefined) {
+            // An object with no animation picked stays still.
+            this.currentAction?.stop();
+            this.currentAction = null;
+            this.currentAnimation = name;
             return;
+        }
 
         const action = this.mixer.clipAction(clip);
         action.reset();
@@ -547,6 +584,8 @@ export class MiiActor {
 
     private setExpression(expression: string): void {
         if (this.currentExpression === expression)
+            return;
+        if (this.isObject)
             return;
         if (this.isImported())
             return this.setImportedFace(expression);
@@ -651,7 +690,11 @@ export class MiiLayer implements ViewerOverlay {
     private depthTexture: THREE.DataTexture | null = null;
     private depthSerial = -1;
     private raycaster = new THREE.Raycaster();
-    private drag: { actor: MiiActor, plane: THREE.Plane, offset: THREE.Vector3, vertical: boolean } | null = null;
+    private drag: {
+        actor: MiiActor, plane: THREE.Plane, offset: THREE.Vector3, vertical: boolean,
+        // Everything that moves with the dragged Mii (its group), and where each one started.
+        members: { actor: MiiActor, start: [number, number, number] }[],
+    } | null = null;
 
     private renderer: THREE.WebGLRenderer;
     private scene = new THREE.Scene();
@@ -784,7 +827,9 @@ export class MiiLayer implements ViewerOverlay {
         this.raycaster.setFromCamera(ndc, this.camera);
         if (this.raycaster.ray.intersectPlane(plane, start) === null)
             start.copy(origin);
-        this.drag = { actor, plane, offset: origin.clone().sub(start), vertical: e.shiftKey };
+        // A grouped Mii brings its whole group along, unless Alt is held.
+        const members = (e.altKey ? [actor] : this.groupOf(actor)).map((a) => ({ actor: a, start: [...a.state.position] as [number, number, number] }));
+        this.drag = { actor, plane, offset: origin.clone().sub(start), vertical: e.shiftKey, members };
         this.viewer.canvas.style.cursor = 'grabbing';
         this.onactormoved(actor, false);
     };
@@ -801,14 +846,22 @@ export class MiiLayer implements ViewerOverlay {
         const ndc = this.mouseNDC(e);
         if (ndc === null)
             return;
-        const { actor, plane, offset, vertical } = this.drag;
+        const { actor, plane, offset, vertical, members } = this.drag;
         const s = actor.state;
+        const start = members.find((m) => m.actor === actor)!.start;
+        const moveBy = (dx: number, dy: number, dz: number) => {
+            for (const m of members) {
+                m.actor.state.position = [m.start[0] + dx, m.start[1] + dy, m.start[2] + dz];
+                m.actor.syncTransform();
+            }
+        };
         if (this.magnet && !vertical) {
             // Stuck to the scenery: over the void, the Mii just waits at its last spot.
             const p = this.pickScenery(ndc.x, ndc.y, s.size);
             if (p !== null) {
-                s.position = p;
-                actor.syncTransform();
+                // In a group, the lowest member is the one that stands on the scenery.
+                const lowest = Math.min(...members.map((m) => m.start[1]));
+                moveBy(p[0] - start[0], p[1] - lowest, p[2] - start[2]);
             }
             return;
         }
@@ -818,10 +871,9 @@ export class MiiLayer implements ViewerOverlay {
             return;
         point.add(offset);
         if (vertical)
-            s.position = [s.position[0], point.y, s.position[2]];
+            moveBy(0, point.y - start[1], 0);
         else
-            s.position = [point.x, s.position[1], point.z];
-        actor.syncTransform();
+            moveBy(point.x - start[0], 0, point.z - start[2]);
     };
 
     private onMouseUp = (e: MouseEvent): void => {
@@ -833,6 +885,11 @@ export class MiiLayer implements ViewerOverlay {
         this.viewer.canvas.style.cursor = '';
         this.onactormoved(actor, true);
     };
+
+    public groupOf(actor: MiiActor): MiiActor[] {
+        const g = actor.state.group;
+        return g === undefined ? [actor] : this.actors.filter((a) => a.state.group === g);
+    }
 
     // Drops a Mii onto the scenery below it (only works where that ground is on screen).
     public dropToGround(actor: MiiActor): boolean {
