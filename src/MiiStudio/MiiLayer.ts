@@ -145,6 +145,16 @@ export interface LightSettings {
     shadowOpacity: number;
 }
 
+// The face features (eyes, mouth, nose lines) are drawn on see-through cards much larger than the head,
+// so they would cast a big flat shadow. Only solid parts cast one.
+function castsShadow(o: THREE.Object3D): boolean {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh)
+        return false;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    return !mats.some((m) => m.transparent || m.alphaTest > 0) && mesh.name !== 'Mask' && mesh.name !== 'Noseline';
+}
+
 // Uniforms of the shadow catcher, filled from the scenery depth snapshot and the Mii light.
 const depthUniforms = {
     uMiiDepth: { value: null as THREE.Texture | null },
@@ -389,7 +399,7 @@ export class MiiActor {
 
         this.headBone = null;
         this.placeholderHead.visible = false;
-        this.body.traverse((o) => { o.castShadow = true; });
+        this.body.traverse((o) => { o.castShadow = castsShadow(o); });
         this.bodyGroup.add(this.body);
         this.mixer = new THREE.AnimationMixer(this.body);
         this.currentAction = null;
@@ -570,7 +580,7 @@ export class MiiActor {
         this.head = head;
         head.traverse((o) => {
             o.frustumCulled = false;
-            o.castShadow = true;
+            o.castShadow = castsShadow(o);
             const mat = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
             // glTF defaults to fully metallic, which renders black without an environment map.
             if (mat !== undefined && mat.isMeshStandardMaterial) {
