@@ -14,50 +14,86 @@ export const BODY_MODEL_BASE_URL = 'https://raw.githubusercontent.com/datkat21/m
 export const DEFAULT_RENDERER_URL = 'https://mii-renderer.nxw.pw/miis/image';
 export const ALT_RENDERER_URL = 'https://mii-unsecure.ariankordi.net/miis/image';
 
-export const EXPRESSIONS: { id: string, name: string }[] = [
-    { id: 'normal', name: 'Normal' },
-    { id: 'smile', name: 'Sourire' },
-    { id: 'anger', name: 'Colère' },
-    { id: 'sorrow', name: 'Tristesse' },
-    { id: 'surprise', name: 'Surprise' },
-    { id: 'blink', name: 'Yeux fermés' },
-    { id: 'normal_open_mouth', name: 'Normal (bouche ouverte)' },
-    { id: 'smile_open_mouth', name: 'Sourire (bouche ouverte)' },
-    { id: 'anger_open_mouth', name: 'Colère (bouche ouverte)' },
-    { id: 'surprise_open_mouth', name: 'Surprise (bouche ouverte)' },
-    { id: 'sorrow_open_mouth', name: 'Tristesse (bouche ouverte)' },
-    { id: 'blink_open_mouth', name: 'Yeux fermés (bouche ouverte)' },
-    { id: 'wink_left', name: 'Clin d\'œil gauche' },
-    { id: 'wink_right', name: 'Clin d\'œil droit' },
-    { id: 'wink_left_open_mouth', name: 'Clin d\'œil gauche (bouche ouverte)' },
-    { id: 'wink_right_open_mouth', name: 'Clin d\'œil droit (bouche ouverte)' },
-    { id: 'like_wink_left', name: 'Clin d\'œil souriant gauche' },
-    { id: 'like_wink_right', name: 'Clin d\'œil souriant droit' },
-    { id: 'frustrated', name: 'Frustré' },
-    { id: '19', name: 'Ennuyé' },
-    { id: '20', name: 'Ennuyé (bouche ouverte)' },
-    { id: '22', name: 'Soupir' },
-    { id: '24', name: 'Dégoûté' },
-    { id: '25', name: 'Amoureux' },
-    { id: '26', name: 'Amoureux (bouche ouverte)' },
-    { id: '28', name: 'Déterminé' },
-    { id: '30', name: 'Pleure' },
-    { id: '32', name: 'Grand sourire' },
-    { id: '33', name: 'Coquin' },
-    { id: '37', name: 'Fier' },
-    { id: '39', name: 'Résolu' },
-    { id: '41', name: 'Incrédule' },
-    { id: '43', name: 'Rusé' },
-    { id: '45', name: 'Tire la langue' },
-    { id: '47', name: 'Innocent' },
-    { id: '53', name: 'Miam' },
-    { id: '56', name: 'Argent' },
-    { id: '58', name: 'Perdu' },
-    { id: '60', name: 'Joyeux' },
-    { id: '64', name: 'Grognon' },
-    { id: '66', name: 'Ému' },
-    { id: '68', name: 'Chante' },
-    { id: '69', name: 'Sidéré' },
+// Face ids starting with this are PNG pictures in the model store, not .glb exports.
+export const IMAGE_FACE_PREFIX = 'img:';
+
+// Mi Creator's expressions; `num` is its expression number, used by the all-emotions import.
+export const EXPRESSIONS: { id: string, num: number, name: string }[] = [
+    { id: 'normal', num: 0, name: 'Normal' },
+    { id: 'smile', num: 1, name: 'Sourire' },
+    { id: 'anger', num: 2, name: 'Colère' },
+    { id: 'sorrow', num: 3, name: 'Tristesse' },
+    { id: 'surprise', num: 4, name: 'Surprise' },
+    { id: 'blink', num: 5, name: 'Yeux fermés' },
+    { id: 'normal_open_mouth', num: 6, name: 'Normal (bouche ouverte)' },
+    { id: 'smile_open_mouth', num: 7, name: 'Sourire (bouche ouverte)' },
+    { id: 'anger_open_mouth', num: 8, name: 'Colère (bouche ouverte)' },
+    { id: 'sorrow_open_mouth', num: 9, name: 'Tristesse (bouche ouverte)' },
+    { id: 'surprise_open_mouth', num: 10, name: 'Surprise (bouche ouverte)' },
+    { id: 'blink_open_mouth', num: 11, name: 'Yeux fermés (bouche ouverte)' },
+    { id: 'wink_left', num: 12, name: 'Clin d\'œil gauche' },
+    { id: 'wink_right', num: 13, name: 'Clin d\'œil droit' },
+    { id: 'wink_left_open_mouth', num: 14, name: 'Clin d\'œil gauche (bouche ouverte)' },
+    { id: 'wink_right_open_mouth', num: 15, name: 'Clin d\'œil droit (bouche ouverte)' },
+    { id: 'like_wink_left', num: 16, name: 'Clin d\'œil souriant gauche' },
+    { id: 'like_wink_right', num: 17, name: 'Clin d\'œil souriant droit' },
+    { id: 'frustrated', num: 18, name: 'Frustré' },
+    { id: '19', num: 19, name: 'Ennuyé' },
+    { id: '20', num: 20, name: 'Ennuyé (bouche ouverte)' },
+    { id: '21', num: 21, name: 'Soupir (bouche droite)' },
+    { id: '22', num: 22, name: 'Soupir' },
+    { id: '23', num: 23, name: 'Dégoûté (bouche droite)' },
+    { id: '24', num: 24, name: 'Dégoûté' },
+    { id: '25', num: 25, name: 'Amoureux' },
+    { id: '26', num: 26, name: 'Amoureux (bouche ouverte)' },
+    { id: '27', num: 27, name: 'Déterminé (bouche droite)' },
+    { id: '28', num: 28, name: 'Déterminé' },
+    { id: '29', num: 29, name: 'Pleure (bouche droite)' },
+    { id: '30', num: 30, name: 'Pleure' },
+    { id: '31', num: 31, name: 'Grand sourire (bouche droite)' },
+    { id: '32', num: 32, name: 'Grand sourire' },
+    { id: '33', num: 33, name: 'Coquin' },
+    { id: '34', num: 34, name: 'Coquin (miroir)' },
+    { id: '35', num: 35, name: 'Résolu, bouche rigolote' },
+    { id: '36', num: 36, name: 'Résolu, bouche rigolote ouverte' },
+    { id: '37', num: 37, name: 'Fier' },
+    { id: '38', num: 38, name: 'Fier (bouche ouverte)' },
+    { id: '39', num: 39, name: 'Résolu' },
+    { id: '40', num: 40, name: 'Résolu (bouche ouverte)' },
+    { id: '41', num: 41, name: 'Incrédule' },
+    { id: '43', num: 43, name: 'Rusé' },
+    { id: '45', num: 45, name: 'Tire la langue' },
+    { id: '47', num: 47, name: 'Innocent' },
+    { id: '48', num: 48, name: 'Innocent (miroir)' },
+    { id: '49', num: 49, name: 'Chat' },
+    { id: '51', num: 51, name: 'Chien' },
+    { id: '53', num: 53, name: 'Miam' },
+    { id: '55', num: 55, name: 'Argent (bouche droite)' },
+    { id: '56', num: 56, name: 'Argent' },
+    { id: '57', num: 57, name: 'Perdu (bouche droite)' },
+    { id: '58', num: 58, name: 'Perdu' },
+    { id: '59', num: 59, name: 'Joyeux (bouche droite)' },
+    { id: '60', num: 60, name: 'Joyeux' },
+    { id: '61', num: 61, name: 'Vide' },
+    { id: '63', num: 63, name: 'Grognon (bouche droite)' },
+    { id: '64', num: 64, name: 'Grognon' },
+    { id: '65', num: 65, name: 'Ému (bouche droite)' },
+    { id: '66', num: 66, name: 'Ému (supplie)' },
+    { id: '67', num: 67, name: 'Chante (petite bouche)' },
+    { id: '68', num: 68, name: 'Chante' },
+    { id: '69', num: 69, name: 'Sidéré' },
+    { id: '70', num: 70, name: 'Démotivé' },
+    { id: '71', num: 71, name: 'Rusé 2' },
+    { id: '72', num: 72, name: 'Repu' },
+    { id: '73', num: 73, name: 'Endormi' },
+    { id: '74', num: 74, name: 'Endormi (œil droit ouvert)' },
+    { id: '75', num: 75, name: 'Perdu 2' },
+    { id: '76', num: 76, name: 'Étourdi' },
+    { id: '77', num: 77, name: 'Clin d\'œil joyeux' },
+    { id: '78', num: 78, name: 'Clin d\'œil joyeux (miroir)' },
+    { id: '79', num: 79, name: 'Pas intéressé' },
+    { id: '80', num: 80, name: 'Espiègle' },
+    { id: '81', num: 81, name: 'Furieux' },
 ];
 
 // What each Miitomo body clip looks like, so poses can be picked without trying them all.
@@ -109,48 +145,105 @@ export interface LightSettings {
     shadowOpacity: number;
 }
 
-// Uniforms shared by every shadow plane, filled from the scenery depth snapshot.
+// Uniforms of the shadow catcher, filled from the scenery depth snapshot and the Mii light.
 const depthUniforms = {
     uMiiDepth: { value: null as THREE.Texture | null },
     uMiiClipFromWorld: { value: new THREE.Matrix4() },
     uMiiWorldFromClip: { value: new THREE.Matrix4() },
     uMiiDepthNegOne: { value: 0 },
     uMiiDepthEnabled: { value: 0 },
+    uMiiCamWorldFromClip: { value: new THREE.Matrix4() },
+    uMiiCamPos: { value: new THREE.Vector3() },
+    uMiiResolution: { value: new THREE.Vector2(1, 1) },
+    uMiiShadowMatrix: { value: new THREE.Matrix4() },
+    uMiiGroundY: { value: 0 },
 };
 
-// A shadow catcher that only keeps the fragments lying on the scenery, so no shadow is drawn over the void.
-function createShadowMaterial(): THREE.ShadowMaterial {
-    const mat = new THREE.ShadowMaterial({ opacity: DEFAULT_LIGHT.shadowOpacity, depthWrite: false });
-    const tolerance = { value: 1 };
-    mat.userData.tolerance = tolerance;
+// Draws the Miis' shadows on whatever scenery is seen at each pixel (slopes, steps, walls),
+// and nothing over the void. It covers the whole screen and is drawn before the Miis.
+// Without a depth snapshot (WebGPU), it falls back to a flat ground under the lowest Mii.
+function createShadowCatcher(): THREE.Mesh<THREE.PlaneGeometry, THREE.ShadowMaterial> {
+    const mat = new THREE.ShadowMaterial({ opacity: DEFAULT_LIGHT.shadowOpacity, depthWrite: false, depthTest: false });
+    // Drawn first among the opaque objects onto the cleared overlay, so no blending is needed and the Miis cover it.
+    mat.transparent = false;
     mat.onBeforeCompile = (shader) => {
-        Object.assign(shader.uniforms, depthUniforms, { uMiiTolerance: tolerance });
+        Object.assign(shader.uniforms, depthUniforms);
         shader.vertexShader = shader.vertexShader
-            .replace('void main() {', 'varying vec3 vMiiWorld;\nvoid main() {')
-            .replace('#include <project_vertex>', '#include <project_vertex>\n\tvMiiWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+            .replace('#include <project_vertex>', '#include <project_vertex>\n\tgl_Position = vec4(position.xy, 0.0, 1.0);');
         shader.fragmentShader = shader.fragmentShader
+            .replace('#include <shadowmask_pars_fragment>', 'vec4 miiShadowCoord;\n' +
+                THREE.ShaderChunk.shadowmask_pars_fragment.replace(/vDirectionalShadowCoord\[ i \]/g, 'miiShadowCoord'))
             .replace('void main() {', `
-varying vec3 vMiiWorld;
 uniform sampler2D uMiiDepth;
 uniform mat4 uMiiClipFromWorld;
 uniform mat4 uMiiWorldFromClip;
 uniform float uMiiDepthNegOne;
 uniform float uMiiDepthEnabled;
-uniform float uMiiTolerance;
+uniform mat4 uMiiCamWorldFromClip;
+uniform vec3 uMiiCamPos;
+uniform vec2 uMiiResolution;
+uniform mat4 uMiiShadowMatrix;
+uniform float uMiiGroundY;
+
+vec3 miiDepthPoint(ivec2 texel, vec2 size, float d) {
+\tvec2 ndc = (vec2(texel) + 0.5) / size * 2.0 - 1.0;
+\tvec4 m = uMiiWorldFromClip * vec4(ndc, uMiiDepthNegOne > 0.5 ? d * 2.0 - 1.0 : d, 1.0);
+\treturn m.xyz / m.w;
+}
+
+// Scenery point seen at this uv of the depth snapshot, or w = 0 for the void. The snapshot is at half
+// resolution, so neighbouring texels are blended on smooth surfaces to keep the shadow's edges clean.
+vec4 miiSceneryAt(vec2 uv) {
+\tif (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return vec4(0.0);
+\tvec2 size = vec2(textureSize(uMiiDepth, 0));
+\tvec2 f = uv * size - 0.5;
+\tivec2 i0 = ivec2(floor(f));
+\tvec2 t = f - floor(f);
+\tivec2 maxTexel = ivec2(size) - 1;
+\tivec2 a = clamp(i0, ivec2(0), maxTexel), b = clamp(i0 + ivec2(1, 0), ivec2(0), maxTexel);
+\tivec2 c = clamp(i0 + ivec2(0, 1), ivec2(0), maxTexel), e = clamp(i0 + ivec2(1, 1), ivec2(0), maxTexel);
+\tfloat da = texelFetch(uMiiDepth, a, 0).r, db = texelFetch(uMiiDepth, b, 0).r;
+\tfloat dc = texelFetch(uMiiDepth, c, 0).r, de = texelFetch(uMiiDepth, e, 0).r;
+\tivec2 nearest = clamp(ivec2(floor(uv * size)), ivec2(0), maxTexel);
+\tfloat dn = texelFetch(uMiiDepth, nearest, 0).r;
+\tif (dn <= 0.0) return vec4(0.0);
+\tvec3 pn = miiDepthPoint(nearest, size, dn);
+\tif (da <= 0.0 || db <= 0.0 || dc <= 0.0 || de <= 0.0) return vec4(pn, 1.0);
+\tvec3 pa = miiDepthPoint(a, size, da), pb = miiDepthPoint(b, size, db);
+\tvec3 pc = miiDepthPoint(c, size, dc), pe = miiDepthPoint(e, size, de);
+\tvec3 p = mix(mix(pa, pb, t.x), mix(pc, pe, t.x), t.y);
+\t// Across a depth edge, blending would invent a point in mid-air.
+\tfloat spread = max(max(distance(pa, pb), distance(pc, pe)), max(distance(pa, pc), distance(pb, pe)));
+\tif (spread > 0.05 * distance(pn, uMiiCamPos)) return vec4(pn, 1.0);
+\treturn vec4(p, 1.0);
+}
+
 void main() {
+\tvec2 ndc = gl_FragCoord.xy / uMiiResolution * 2.0 - 1.0;
+\tvec4 far = uMiiCamWorldFromClip * vec4(ndc, 1.0, 1.0);
+\tvec3 ray = normalize(far.xyz / far.w - uMiiCamPos);
+\tvec3 p;
 \tif (uMiiDepthEnabled > 0.5) {
-\t\tvec4 c = uMiiClipFromWorld * vec4(vMiiWorld, 1.0);
-\t\tif (c.w <= 0.0) discard;
-\t\tvec3 n = c.xyz / c.w;
-\t\tvec2 uv = n.xy * 0.5 + 0.5;
-\t\tif (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
-\t\tfloat d = texture2D(uMiiDepth, uv).r;
-\t\tif (d <= 0.0) discard;
-\t\tvec4 m = uMiiWorldFromClip * vec4(n.xy, uMiiDepthNegOne > 0.5 ? d * 2.0 - 1.0 : d, 1.0);
-\t\tif (distance(m.xyz / m.w, vMiiWorld) > uMiiTolerance) discard;
-\t}`);
+\t\tvec4 s = miiSceneryAt(ndc * 0.5 + 0.5);
+\t\tif (s.w == 0.0) discard;
+\t\t// The snapshot can be a frame or two old: look again where this pixel's ray is at that distance.
+\t\tvec4 c = uMiiClipFromWorld * vec4(uMiiCamPos + ray * distance(s.xyz, uMiiCamPos), 1.0);
+\t\tif (c.w > 0.0) {
+\t\t\tvec4 s2 = miiSceneryAt(c.xy / c.w * 0.5 + 0.5);
+\t\t\tif (s2.w > 0.0) s = s2;
+\t\t}
+\t\tp = s.xyz;
+\t} else {
+\t\tif (ray.y > -1e-4) discard;
+\t\tp = uMiiCamPos + ray * ((uMiiGroundY - uMiiCamPos.y) / ray.y);
+\t}
+\tmiiShadowCoord = uMiiShadowMatrix * vec4(p, 1.0);`);
     };
-    return mat;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -1;
+    return mesh;
 }
 
 export const DEFAULT_LIGHT: LightSettings = {
@@ -199,7 +292,6 @@ export class MiiActor {
     public head: THREE.Object3D | null = null;
     public placeholderHead: THREE.Mesh;
     // Catches the Mii's shadow on the ground under its feet; only the shadow itself is drawn.
-    public shadowPlane: THREE.Mesh<THREE.PlaneGeometry, THREE.ShadowMaterial>;
     public headError: string | null = null;
     public currentAnimation: string | null = null;
     public currentExpression: string | null = null;
@@ -219,11 +311,6 @@ export class MiiActor {
         this.placeholderHead = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshLambertMaterial({ color: 0xF0C8A0 }));
         this.placeholderHead.visible = false;
         this.root.add(this.placeholderHead);
-        this.shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), createShadowMaterial());
-        this.shadowPlane.rotation.x = -Math.PI / 2;
-        this.shadowPlane.receiveShadow = true;
-        this.shadowPlane.frustumCulled = false;
-        this.root.add(this.shadowPlane);
     }
 
     public isImported(): boolean {
@@ -312,6 +399,24 @@ export class MiiActor {
         this.applyStepAt(this.layer.clock, true);
     }
 
+    // Imported face pictures have no sampler of their own, so they take the export's.
+    private matchMaskSampler(tex: THREE.Texture): void {
+        const base = this.baseMask;
+        if (base === null || tex === base || (tex.wrapS === base.wrapS && tex.wrapT === base.wrapT && tex.minFilter === base.minFilter && tex.magFilter === base.magFilter))
+            return;
+        tex.wrapS = base.wrapS;
+        tex.wrapT = base.wrapT;
+        tex.minFilter = base.minFilter;
+        tex.magFilter = base.magFilter;
+        tex.needsUpdate = true;
+    }
+
+    // The export's own face picture, to check how imported faces line up with it.
+    public getBaseMaskImage(): CanvasImageSource | null {
+        const img = this.baseMask?.image as CanvasImageSource | undefined;
+        return img ?? null;
+    }
+
     private setImportedFace(expression: string): void {
         if (this.maskMaterial === null)
             return;
@@ -324,6 +429,7 @@ export class MiiActor {
         }
         const cached = this.layer.getCachedFace(faceId);
         if (cached !== undefined) {
+            this.matchMaskSampler(cached);
             this.maskMaterial.map = cached;
             this.maskMaterial.needsUpdate = true;
             this.currentExpression = expression;
@@ -385,10 +491,6 @@ export class MiiActor {
         this.root.rotation.set(0, s.yaw * Math.PI / 180, 0);
         const scale = s.size / this.bodyHeight;
         this.root.scale.setScalar(scale);
-        // Big enough for long shadows from a low light.
-        this.shadowPlane.scale.setScalar(this.bodyHeight * 8);
-        (this.shadowPlane.material.userData.tolerance as { value: number }).value = s.size * 0.08;
-        this.shadowPlane.position.y = this.bodyHeight * 0.002;
         if (this.isImported()) {
             this.bodyGroup.scale.setScalar(1);
         } else {
@@ -546,6 +648,7 @@ export class MiiLayer implements ViewerOverlay {
     private camera = new THREE.PerspectiveCamera();
     private hemiLight = new THREE.HemisphereLight(0xFFFFFF, 0x808080, 1.6);
     private dirLight = new THREE.DirectionalLight(0xFFFFFF, 1.6);
+    private shadowCatcher = createShadowCatcher();
     private light: LightSettings = { ...DEFAULT_LIGHT };
     private lightDir = new THREE.Vector3();
     private tmpCenter = new THREE.Vector3();
@@ -573,7 +676,8 @@ export class MiiLayer implements ViewerOverlay {
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.dirLight.shadow.mapSize.set(2048, 2048);
-        this.scene.add(this.hemiLight, this.dirLight, this.dirLight.target);
+        this.scene.add(this.hemiLight, this.dirLight, this.dirLight.target, this.shadowCatcher);
+        depthUniforms.uMiiShadowMatrix.value = this.dirLight.shadow.matrix;
         this.setLight(this.light);
 
         this.camera.matrixAutoUpdate = false;
@@ -602,7 +706,6 @@ export class MiiLayer implements ViewerOverlay {
         for (const actor of this.actors) {
             if (!actor.state.visible)
                 continue;
-            actor.shadowPlane.visible = false;
             const hits = this.raycaster.intersectObject(actor.root, true);
             if (hits.length > 0 && hits[0].distance < bestDist) {
                 bestDist = hits[0].distance;
@@ -771,23 +874,27 @@ export class MiiLayer implements ViewerOverlay {
     private updateLight(): void {
         const box = new THREE.Box3();
         let maxSize = 0;
+        let groundY = Infinity;
         for (const actor of this.actors) {
-            actor.shadowPlane.visible = this.light.shadow;
-            actor.shadowPlane.material.opacity = this.light.shadowOpacity;
             if (!actor.state.visible)
                 continue;
             box.expandByPoint(this.tmpCenter.fromArray(actor.state.position));
             maxSize = Math.max(maxSize, actor.state.size);
+            groundY = Math.min(groundY, actor.state.position[1]);
         }
+        this.shadowCatcher.visible = this.light.shadow && !box.isEmpty();
+        this.shadowCatcher.material.opacity = this.light.shadowOpacity;
         if (box.isEmpty())
             return;
+        depthUniforms.uMiiGroundY.value = groundY;
         box.getCenter(this.tmpCenter);
         const radius = box.max.distanceTo(box.min) / 2 + maxSize * 3;
         this.dirLight.target.position.copy(this.tmpCenter);
         this.dirLight.position.copy(this.tmpCenter).addScaledVector(this.lightDir, radius * 2);
         const cam = this.dirLight.shadow.camera;
         cam.left = -radius; cam.right = radius; cam.top = radius; cam.bottom = -radius;
-        cam.near = radius * 0.5; cam.far = radius * 4;
+        // Deep enough to reach the end of long shadows from a low light.
+        cam.near = radius * 0.5; cam.far = radius * 12;
         cam.updateProjectionMatrix();
         this.dirLight.shadow.bias = -0.0005;
         this.dirLight.shadow.normalBias = maxSize * 0.005;
@@ -813,6 +920,19 @@ export class MiiLayer implements ViewerOverlay {
     }
 
     public async loadFace(id: string): Promise<THREE.Texture> {
+        const cached = this.faceCache.get(id);
+        if (cached !== undefined)
+            return cached;
+        if (id.startsWith(IMAGE_FACE_PREFIX)) {
+            // A face picture from the all-emotions import, laid out like the .glb's Mask texture.
+            const blob = new Blob([await loadModel(id.slice(IMAGE_FACE_PREFIX.length))], { type: 'image/png' });
+            const tex = new THREE.Texture(await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
+            tex.flipY = false;
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            this.faceCache.set(id, tex);
+            return tex;
+        }
         const gltf = await this.loadUserModel(id);
         let map: THREE.Texture | null = null;
         gltf.scene.traverse((o) => {
@@ -955,6 +1075,10 @@ export class MiiLayer implements ViewerOverlay {
         this.camera.updateProjectionMatrix();
         this.camera.matrixWorld.fromArray(cam.worldMatrix as Float32Array);
         this.camera.matrixWorldInverse.fromArray(cam.viewMatrix as Float32Array);
+
+        depthUniforms.uMiiCamWorldFromClip.value.multiplyMatrices(this.camera.matrixWorld, this.camera.projectionMatrixInverse);
+        depthUniforms.uMiiCamPos.value.setFromMatrixPosition(this.camera.matrixWorld);
+        this.renderer.getDrawingBufferSize(depthUniforms.uMiiResolution.value);
 
         this.renderer.render(this.scene, this.camera);
     }
