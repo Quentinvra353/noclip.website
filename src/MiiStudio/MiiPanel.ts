@@ -31,6 +31,8 @@ interface LibraryEntry {
     // Imported Mi Creator 3D model, and one export per extra expression.
     model?: string;
     faces?: Record<string, string>;
+    // A .glb that is not a Mi Creator export (a door, a kart…).
+    object?: boolean;
 }
 
 function expressionName(id: string, imported: boolean): string {
@@ -183,6 +185,8 @@ export class MiiPanel extends Panel {
     })();
     // Emotion picked for an imported Mii that has no face for it yet, waiting for its export file.
     private alignTarget: MiiActor | null = null;
+    // A group picked in the list: its settings move every member at once.
+    private selectedGroup: string | null = null;
     private recorder: VideoRecorder | null = null;
     private pendingFace: { actor: MiiActor, expression: string, apply: (expression: string) => void } | null = null;
 
@@ -237,6 +241,8 @@ export class MiiPanel extends Panel {
         this.layer.magnet = this.settings.magnet;
         this.layer.onactormoved = (actor, done) => {
             this.selected = actor;
+            if (this.selectedGroup !== null && actor.state.group !== this.selectedGroup)
+                this.selectedGroup = null;
             if (done)
                 this.changed();
             this.rebuild();
@@ -362,10 +368,14 @@ export class MiiPanel extends Panel {
     private async addModelToLibrary(name: string, file: File): Promise<void> {
         try {
             const id = await saveModel(await file.arrayBuffer());
-            const label = name.trim() || file.name.replace(/_all_body.*$|\.glb$/i, '') || `Mii ${this.library.length + 1}`;
-            this.library.push({ name: label, model: id, faces: {} });
+            const gltf = await this.layer!.loadUserModel(id);
+            const object = gltf.scene.getObjectByName('Mask') === undefined;
+            const label = name.trim() || file.name.replace(/_all_body.*$|\.glb$/i, '') || `${object ? 'Objet' : 'Mii'} ${this.library.length + 1}`;
+            this.library.push({ name: label, model: id, faces: {}, object });
             saveJSON(LIBRARY_KEY, this.library);
-            this.setMessage(`« ${label} » ajouté (modèle 3D Mi Creator). Place-le, puis choisis une émotion dans sa liste « Émotion » pour l'ajouter.`);
+            this.setMessage(object
+                ? `« ${label} » ajouté (objet 3D). Place-le avec « Placer ici », puis règle sa taille.`
+                : `« ${label} » ajouté (modèle 3D Mi Creator). Place-le, puis choisis une émotion dans sa liste « Émotion » pour l'ajouter.`);
         } catch (e) {
             this.setMessage(`Impossible d'enregistrer le modèle 3D (${e}).`);
         }
@@ -534,9 +544,9 @@ export class MiiPanel extends Panel {
     }
 
     private buildLibrary(): HTMLElement[] {
-        const out: HTMLElement[] = [section('Mes Mii')];
+        const out: HTMLElement[] = [section('Mes Mii et objets')];
 
-        const nameInput = el('input', { type: 'text', placeholder: 'Nom du Mii' });
+        const nameInput = el('input', { type: 'text', placeholder: 'Nom du Mii ou de l\'objet' });
         const dataInput = el('textarea', { placeholder: 'Colle ici les « Données CharInfo/Switch (Hex) » de Mi Creator, puis sur une 2e ligne les « Données Mii Creator (Base64) »' });
         const fileInput = el('input', { type: 'file', accept: '.glb,.miic,.mii,.charinfo,.ffsd,.cfsd,.bin,.rcd,.3dsmii,.txt' });
         fileInput.multiple = true;
@@ -585,7 +595,7 @@ export class MiiPanel extends Panel {
 
         this.library.forEach((entry, i) => {
             const faceCount = Object.keys(entry.faces ?? {}).length;
-            const label = entry.model !== undefined ? `${entry.name} (3D, ${faceCount + 1} visage${faceCount > 0 ? 's' : ''})` : entry.name;
+            const label = entry.object ? `${entry.name} (objet 3D)` : entry.model !== undefined ? `${entry.name} (3D, ${faceCount + 1} visage${faceCount > 0 ? 's' : ''})` : entry.name;
             out.push(el('div', { className: 'MiiStudioItem' }, [
                 el('span', { textContent: label, title: entry.data ?? '' }),
                 button('Placer ici', () => this.placeFromLibrary(entry), 'Place ce Mii devant la caméra'),
@@ -616,16 +626,16 @@ export class MiiPanel extends Panel {
         };
         out.push(el('div', { className: 'MiiStudioInline' }, [moveBtn, el('label', { className: 'MiiStudioInline' }, [magnet, '🧲 Aimanter au décor'])]));
         if (layer.moveMode)
-            out.push(el('div', { className: 'MiiStudioHint', textContent: 'Clique sur un Mii et fais-le glisser. Avec l\'aimant, il se pose sur la surface sous la souris. Maintiens Maj en cliquant pour le monter ou le descendre. Clique à côté des Mii pour bouger la caméra comme d\'habitude.' }));
+            out.push(el('div', { className: 'MiiStudioHint', textContent: 'Clique sur un Mii et fais-le glisser. Avec l\'aimant, il se pose sur la surface sous la souris. Maintiens Maj en cliquant pour le monter ou le descendre. Un membre d\'un groupe emmène tout son groupe (Alt pour ne bouger que lui). Clique à côté des Mii pour bouger la caméra comme d\'habitude.' }));
         if (!layer.depth.supported)
             out.push(el('div', { className: 'MiiStudioHint', textContent: 'L\'aimant et l\'ombre sur le sol réel ne marchent qu\'avec le rendu WebGL (pas WebGPU).' }));
         if (layer.actors.length === 0) {
             out.push(el('div', { textContent: 'Aucun Mii placé. Vole jusqu\'à l\'endroit voulu puis clique sur « Placer ici ».' }));
             return out;
         }
-        for (const actor of layer.actors) {
-            const item = el('div', { className: 'MiiStudioItem' + (actor === this.selected ? ' selected' : '') }, [
-                el('span', { textContent: actor.state.name, onclick: () => { this.selected = actor; this.rebuild(); } }),
+        const actorItem = (actor: MiiActor, indent: boolean) => {
+            const item = el('div', { className: 'MiiStudioItem' + (actor === this.selected && this.selectedGroup === null ? ' selected' : '') }, [
+                el('span', { textContent: (indent ? '　└ ' : '') + actor.state.name, onclick: () => { this.selected = actor; this.selectedGroup = null; this.rebuild(); } }),
                 button(actor.state.visible ? 'Cacher' : 'Montrer', () => {
                     actor.state.visible = !actor.state.visible;
                     actor.syncTransform();
@@ -641,7 +651,182 @@ export class MiiPanel extends Panel {
                 }, 'Retirer de la map'),
             ]);
             out.push(item);
+        };
+        const groups = this.groupNames();
+        for (const g of groups) {
+            const members = layer.actors.filter((a) => a.state.group === g);
+            const allHidden = members.every((a) => !a.state.visible);
+            out.push(el('div', { className: 'MiiStudioItem' + (this.selectedGroup === g ? ' selected' : '') }, [
+                el('span', { textContent: `📦 ${g} (${members.length})`, title: 'Régler tout le groupe', onclick: () => { this.selectedGroup = g; this.rebuild(); } }),
+                button(allHidden ? 'Montrer' : 'Cacher', () => {
+                    for (const a of members) {
+                        a.state.visible = allHidden;
+                        a.syncTransform();
+                    }
+                    this.changed();
+                    this.rebuild();
+                }),
+            ]));
+            for (const a of members)
+                actorItem(a, true);
         }
+        for (const actor of layer.actors)
+            if (actor.state.group === undefined)
+                actorItem(actor, false);
+        return out;
+    }
+
+    private groupNames(): string[] {
+        const names: string[] = [];
+        for (const a of this.layer!.actors)
+            if (a.state.group !== undefined && !names.includes(a.state.group))
+                names.push(a.state.group);
+        return names;
+    }
+
+    private newGroupName(): string {
+        const names = this.groupNames();
+        for (let i = 1; ; i++)
+            if (!names.includes(`Groupe ${i}`))
+                return `Groupe ${i}`;
+    }
+
+    private setGroup(actor: MiiActor, group: string | undefined): void {
+        if (group === undefined)
+            delete actor.state.group;
+        else
+            actor.state.group = group;
+        this.changed();
+        this.rebuild();
+    }
+
+    // Settings that move, turn and resize every member of a group together.
+    private buildGroup(g: string): HTMLElement[] {
+        const layer = this.layer!;
+        const members = layer.actors.filter((a) => a.state.group === g);
+        if (members.length === 0) {
+            this.selectedGroup = null;
+            return [];
+        }
+        const out: HTMLElement[] = [section(`Groupe « ${g} »`)];
+        const sync = () => { for (const a of members) a.syncTransform(); this.changed(); };
+        const center = (): [number, number, number] => {
+            const c: [number, number, number] = [0, 0, 0];
+            for (const a of members)
+                for (let i = 0; i < 3; i++)
+                    c[i] += a.state.position[i] / members.length;
+            return c;
+        };
+        const lowest = () => Math.min(...members.map((a) => a.state.position[1]));
+        const moveBy = (dx: number, dy: number, dz: number) => {
+            for (const a of members)
+                a.state.position = [a.state.position[0] + dx, a.state.position[1] + dy, a.state.position[2] + dz];
+            sync();
+        };
+        // Turns the group around its center, like one object.
+        const rotateBy = (deg: number) => {
+            const c = center(), r = deg * Math.PI / 180, cos = Math.cos(r), sin = Math.sin(r);
+            for (const a of members) {
+                const x = a.state.position[0] - c[0], z = a.state.position[2] - c[2];
+                a.state.position = [c[0] + x * cos + z * sin, a.state.position[1], c[2] - x * sin + z * cos];
+                a.state.yaw = ((a.state.yaw + deg + 180) % 360 + 360) % 360 - 180;
+            }
+            sync();
+        };
+        // Resizes the group from the middle of its base, so it stays on the ground.
+        const scaleBy = (k: number) => {
+            const c = center(), y0 = lowest();
+            for (const a of members) {
+                const p = a.state.position;
+                a.state.position = [c[0] + (p[0] - c[0]) * k, y0 + (p[1] - y0) * k, c[2] + (p[2] - c[2]) * k];
+                a.state.size *= k;
+            }
+            sync();
+        };
+        const maxSize = Math.max(...members.map((a) => a.state.size));
+        const step = maxSize / 10;
+
+        const nameInput = el('input', { type: 'text', value: g });
+        nameInput.onchange = () => {
+            const n = nameInput.value.trim();
+            if (n === '' || (n !== g && this.groupNames().includes(n))) {
+                nameInput.value = g;
+                return;
+            }
+            for (const a of members)
+                a.state.group = n;
+            this.selectedGroup = n;
+            this.changed();
+            this.rebuild();
+        };
+        out.push(row('Nom', nameInput));
+        out.push(row('Membres', el('div', { className: 'MiiStudioInline' }, members.map((a) =>
+            button(a.state.name, () => { this.selected = a; this.selectedGroup = null; this.rebuild(); }, 'Régler ce membre tout seul')))));
+        const others = layer.actors.filter((a) => a.state.group !== g);
+        if (others.length > 0)
+            out.push(row('Ajouter', select([{ value: '', label: 'Choisir un Mii ou un objet…' }, ...others.map((a, i) => ({ value: String(i), label: a.state.name }))], '', (v) => {
+                if (v !== '')
+                    this.setGroup(others[Number(v)], g);
+            })));
+
+        const c = center();
+        const pos = el('div', { className: 'MiiStudioInline' });
+        for (let i = 0; i < 3; i++)
+            pos.append(numberInput(c[i], step, (v) => { const d: [number, number, number] = [0, 0, 0]; d[i] = v - center()[i]; moveBy(d[0], d[1], d[2]); }));
+        out.push(row('Centre X Y Z', pos));
+        out.push(row('Déplacer', el('div', { className: 'MiiStudioInline' }, [
+            button('Devant la caméra', () => {
+                const p = this.cameraPlacement(maxSize).position, c = center();
+                moveBy(p[0] - c[0], p[1] - lowest(), p[2] - c[2]);
+                this.rebuild();
+            }),
+            button('Poser au sol', () => {
+                const low = members.reduce((a, b) => (b.state.position[1] < a.state.position[1] ? b : a));
+                const before = low.state.position[1];
+                if (!layer.dropToGround(low)) {
+                    this.setMessage('Pas de sol trouvé sous ce groupe. Il faut que le sol sous lui soit visible à l\'écran.');
+                    return;
+                }
+                const dy = low.state.position[1] - before;
+                low.state.position = [low.state.position[0], before, low.state.position[2]];
+                moveBy(0, dy, 0);
+                this.setMessage('');
+                this.rebuild();
+            }, 'Fait tomber le groupe sur le décor en dessous'),
+            button('▲', () => { moveBy(0, step, 0); this.rebuild(); }, 'Monter'),
+            button('▼', () => { moveBy(0, -step, 0); this.rebuild(); }, 'Descendre'),
+        ])));
+
+        // The slider turns the group by how far it is dragged, then springs back to 0.
+        const turn = el('input', { type: 'range', min: '-180', max: '180', step: '1', value: '0' });
+        let last = 0;
+        turn.oninput = () => { const v = parseFloat(turn.value); rotateBy(v - last); last = v; };
+        turn.onchange = () => { turn.value = '0'; last = 0; this.rebuild(); };
+        turn.style.flex = '1';
+        out.push(row('Tourner', el('div', { className: 'MiiStudioInline' }, [turn])));
+        out.push(row('', el('div', { className: 'MiiStudioInline' }, [
+            button('↺ 15°', () => { rotateBy(15); this.rebuild(); }),
+            button('↻ 15°', () => { rotateBy(-15); this.rebuild(); }),
+            button('↺ 90°', () => { rotateBy(90); this.rebuild(); }),
+            button('↻ 90°', () => { rotateBy(-90); this.rebuild(); }),
+            button('Demi-tour', () => { rotateBy(180); this.rebuild(); }),
+        ])));
+        out.push(row('Taille', el('div', { className: 'MiiStudioInline' }, [
+            button('−10 %', () => { scaleBy(1 / 1.1); this.rebuild(); }),
+            button('+10 %', () => { scaleBy(1.1); this.rebuild(); }),
+            button('÷2', () => { scaleBy(0.5); this.rebuild(); }),
+            button('×2', () => { scaleBy(2); this.rebuild(); }),
+        ])));
+        out.push(el('div', { className: 'MiiStudioInline' }, [
+            button('Dissocier le groupe', () => {
+                for (const a of members)
+                    delete a.state.group;
+                this.selectedGroup = null;
+                this.changed();
+                this.rebuild();
+            }, 'Les membres restent en place, mais ne bougent plus ensemble'),
+        ]));
+        out.push(el('div', { className: 'MiiStudioHint', textContent: 'À la souris, faire glisser un membre déplace tout le groupe. Maintiens Alt pour ne déplacer que lui.' }));
         return out;
     }
 
@@ -662,6 +847,8 @@ export class MiiPanel extends Panel {
     }
 
     private buildSelected(): HTMLElement[] {
+        if (this.selectedGroup !== null)
+            return this.buildGroup(this.selectedGroup);
         const actor = this.selected;
         if (actor === null || !this.layer!.actors.includes(actor))
             return [];
@@ -669,15 +856,29 @@ export class MiiPanel extends Panel {
         const base = s.steps[0];
         const out: HTMLElement[] = [section(`Réglages de « ${s.name} »`)];
 
+        const groups = this.groupNames();
+        out.push(row('Groupe', el('div', { className: 'MiiStudioInline' }, [
+            select([{ value: '', label: 'Aucun' }, ...groups.map((g) => ({ value: g, label: g })), { value: '\u0000new', label: '+ Nouveau groupe' }], s.group ?? '', (v) => {
+                this.setGroup(actor, v === '' ? undefined : v === '\u0000new' ? this.newGroupName() : v);
+            }),
+            ...(s.group !== undefined ? [button('Régler le groupe', () => { this.selectedGroup = s.group!; this.rebuild(); })] : []),
+        ])));
+
         const animOptions = actor.getAnimationNames()
             .sort((a, b) => animationSortKey(a) - animationSortKey(b))
             .map((a) => ({ value: a, label: animationDisplayName(a, s.bodyModel) }));
         const exprOptions = this.expressionOptions(actor);
 
-        out.push(row('Animation', select(animOptions, base.animation, (v) => { base.animation = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
-        out.push(row('Émotion', select(exprOptions, base.expression, (v) => this.pickExpression(actor, v, (e) => { base.expression = e; }))));
-        out.push(...this.buildPendingFace(actor));
-        out.push(...this.buildEmotionImport(actor));
+        if (actor.isObject) {
+            // Objects only have the animations their .glb brings, if any.
+            if (animOptions.length > 0)
+                out.push(row('Animation', select([{ value: '', label: 'Aucune (immobile)' }, ...animOptions], animOptions.some((o) => o.value === base.animation) ? base.animation : '', (v) => { base.animation = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
+        } else {
+            out.push(row('Animation', select(animOptions, base.animation, (v) => { base.animation = v; actor.applyStepAt(this.layer!.clock); this.changed(); })));
+            out.push(row('Émotion', select(exprOptions, base.expression, (v) => this.pickExpression(actor, v, (e) => { base.expression = e; }))));
+            out.push(...this.buildPendingFace(actor));
+            out.push(...this.buildEmotionImport(actor));
+        }
 
         const reload = async () => {
             this.changed();
@@ -688,7 +889,7 @@ export class MiiPanel extends Panel {
             }
             this.rebuild();
         };
-        out.push(row('Corps', select([{ value: 'miitomo', label: 'Miitomo (16 poses)' }, { value: 'wiiu', label: 'Wii U (14 poses)' }], s.bodyModel, (v) => { s.bodyModel = v as BodyModel; reload(); })));
+        if (!actor.isObject) out.push(row('Corps', select([{ value: 'miitomo', label: 'Miitomo (16 poses)' }, { value: 'wiiu', label: 'Wii U (14 poses)' }], s.bodyModel, (v) => { s.bodyModel = v as BodyModel; reload(); })));
         if (!actor.isImported()) out.push(row('Sexe', select([{ value: '0', label: 'Garçon' }, { value: '1', label: 'Fille' }], String(s.gender), (v) => { s.gender = Number(v) as MiiGender; reload(); })));
         if (!actor.isImported()) out.push(row('Couleur', select(FAVORITE_COLOR_NAMES.map((n, i) => ({ value: String(i), label: n })), String(s.favoriteColor), (v) => { s.favoriteColor = Number(v); reload(); })));
 
@@ -807,8 +1008,8 @@ export class MiiPanel extends Panel {
             const t = numberInput(st.time, 0.1, (v) => { st.time = Math.max(0, v); s.steps.sort((a, b) => a.time - b.time); this.changed(); this.rebuild(); });
             out.push(el('div', { className: 'MiiStudioInline' }, [
                 t,
-                select(animOptions, st.animation, (v) => { st.animation = v; this.changed(); }),
-                select(exprOptions, st.expression, (v) => this.pickExpression(actor, v, (e) => { st.expression = e; })),
+                select(actor.isObject ? [{ value: '', label: 'Aucune (immobile)' }, ...animOptions] : animOptions, st.animation, (v) => { st.animation = v; this.changed(); }),
+                ...(actor.isObject ? [] : [select(exprOptions, st.expression, (v) => this.pickExpression(actor, v, (e) => { st.expression = e; }))]),
                 button('✕', () => { s.steps.splice(i, 1); this.changed(); this.rebuild(); }),
             ]));
         });
